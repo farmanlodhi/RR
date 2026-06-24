@@ -10,16 +10,13 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 2. Python 3.10 (most stable for Buildozer + p4a) ──────────
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # ── 3. System dependencies ────────────────────────────────────
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
@@ -33,19 +30,13 @@ jobs:
             zlib1g-dev libncurses5-dev libncursesw5-dev \
             cmake lld ccache \
             openjdk-17-jdk \
-            libltdl-dev \
-            libgdbm-dev \
-            liblzma-dev \
-            libreadline-dev
+            libltdl-dev libgdbm-dev liblzma-dev libreadline-dev
 
-      # ── 4. Buildozer + Cython ─────────────────────────────────────
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip wheel setuptools
-          pip install buildozer
-          pip install "cython<3"
+          pip install buildozer "cython<3"
 
-      # ── 5. Cache ~/.buildozer (SDK/NDK — saves 20+ min on reruns) ─
       - name: Cache Buildozer directory
         uses: actions/cache@v4
         with:
@@ -54,43 +45,48 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      # ── 6. Accept Android SDK licences non-interactively ──────────
+      # ── THE FIX: pre-accept all Android SDK licences by writing the
+      #    licence hash files that sdkmanager checks for. This bypasses
+      #    the interactive prompt entirely. ───────────────────────────
       - name: Accept Android SDK licences
         run: |
-          mkdir -p ~/.android
-          touch ~/.android/repositories.cfg
-          echo "count=0" > ~/.android/repositories.cfg
+          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
+          # android-sdk-license  (covers platform-tools, build-tools, platforms)
+          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\n d56f5187479451eabf01fb78af6dfcb131a6481e\n 24333f8a63b6825ea9c5514f83c2829b004d1fee' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
+          # android-sdk-preview-license
+          printf '\n84831b9409646a918e30573bab4c9c91346d8abd' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
+          # intel-android-extra-license
+          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
+          echo "Licence files written:"
+          ls -la ~/.buildozer/android/platform/android-sdk/licenses/
 
-      # ── 7. Build APK ──────────────────────────────────────────────
       - name: Build APK
         run: |
           buildozer -v android debug 2>&1 | tee build.log
 
-      # ── 8. Find APK (wherever buildozer put it) ───────────────────
       - name: Find APK
         if: always()
         run: |
-          echo "=== Searching entire workspace for APK files ==="
-          find . -name "*.apk" 2>/dev/null || echo "No APK found anywhere"
+          echo "=== Searching for APK files ==="
+          find . -name "*.apk" 2>/dev/null || echo "No APK found"
           echo ""
-          echo "=== Contents of bin/ (if exists) ==="
-          ls -la bin/ 2>/dev/null || echo "bin/ directory does not exist"
+          echo "=== Contents of bin/ ==="
+          ls -la bin/ 2>/dev/null || echo "bin/ does not exist"
           echo ""
-          echo "=== Last 150 lines of build log ==="
-          tail -150 build.log || true
+          echo "=== Last 50 lines of build log ==="
+          tail -50 build.log || true
 
-      # ── 9. Upload APK ─────────────────────────────────────────────
       - name: Upload APK
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: receipt-reader-apk
-          path: |
-            bin/*.apk
-            **/*.apk
+          path: bin/*.apk
           if-no-files-found: warn
 
-      # ── 10. Upload build log (always, even on failure) ────────────
       - name: Upload build log
         uses: actions/upload-artifact@v4
         if: always()
