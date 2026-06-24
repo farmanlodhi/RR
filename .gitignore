@@ -1,0 +1,18 @@
+# Buildozer artefacts
+.buildozer/
+bin/
+build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# AI config (contains your API key — never commit this)
+.ai_config.json
+.last_file
+
+# OS
+.DS_Store
+Thumbs.db
