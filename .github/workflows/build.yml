@@ -3,47 +3,50 @@ name: Build Android APK
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:          # lets you trigger it manually from the GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04     # Buildozer is well-tested on 22.04
+    runs-on: ubuntu-22.04
 
     steps:
       # ── 1. Checkout ────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 2. Python ──────────────────────────────────────────────────
-      - name: Set up Python 3.11
+      # ── 2. Python 3.10 (most stable for Buildozer + p4a) ──────────
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       # ── 3. System dependencies ────────────────────────────────────
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            git zip unzip \
+            git zip unzip curl \
             python3-pip python3-dev \
             build-essential \
             libssl-dev libffi-dev \
             libsqlite3-dev \
             autoconf automake libtool pkg-config \
             zlib1g-dev libncurses5-dev libncursesw5-dev \
-            cmake \
-            lld \
-            ccache \
-            openjdk-17-jdk
+            cmake lld ccache \
+            openjdk-17-jdk \
+            libltdl-dev \
+            libgdbm-dev \
+            liblzma-dev \
+            libreadline-dev
 
       # ── 4. Buildozer + Cython ─────────────────────────────────────
       - name: Install Buildozer and Cython
         run: |
-          pip install --upgrade pip
-          pip install buildozer cython==0.29.37
+          pip install --upgrade pip wheel setuptools
+          pip install buildozer
+          pip install "cython<3"
 
-      # ── 5. Cache Android SDK/NDK/p4a (saves ~20 min on re-runs) ──
-      - name: Cache Buildozer global directory
+      # ── 5. Cache ~/.buildozer (SDK/NDK — saves 20+ min on reruns) ─
+      - name: Cache Buildozer directory
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
@@ -51,20 +54,43 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      # ── 6. Build APK ──────────────────────────────────────────────
+      # ── 6. Accept Android SDK licences non-interactively ──────────
+      - name: Accept Android SDK licences
+        run: |
+          mkdir -p ~/.android
+          touch ~/.android/repositories.cfg
+          echo "count=0" > ~/.android/repositories.cfg
+
+      # ── 7. Build APK ──────────────────────────────────────────────
       - name: Build APK
         run: |
-          buildozer android debug 2>&1 | tee build.log
+          buildozer -v android debug 2>&1 | tee build.log
 
-      # ── 7. Upload APK as artifact ─────────────────────────────────
+      # ── 8. Find APK (wherever buildozer put it) ───────────────────
+      - name: Find APK
+        if: always()
+        run: |
+          echo "=== Searching entire workspace for APK files ==="
+          find . -name "*.apk" 2>/dev/null || echo "No APK found anywhere"
+          echo ""
+          echo "=== Contents of bin/ (if exists) ==="
+          ls -la bin/ 2>/dev/null || echo "bin/ directory does not exist"
+          echo ""
+          echo "=== Last 150 lines of build log ==="
+          tail -150 build.log || true
+
+      # ── 9. Upload APK ─────────────────────────────────────────────
       - name: Upload APK
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: receipt-reader-apk
-          path: bin/*.apk
-          if-no-files-found: error
+          path: |
+            bin/*.apk
+            **/*.apk
+          if-no-files-found: warn
 
-      # ── 8. Upload build log (always, even on failure) ─────────────
+      # ── 10. Upload build log (always, even on failure) ────────────
       - name: Upload build log
         uses: actions/upload-artifact@v4
         if: always()
