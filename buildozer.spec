@@ -12,8 +12,7 @@ source.include_exts = py,png,jpg,kv,atlas,json
 # Version
 version = 1.0.0
 
-# Requirements
-# Note: openai and anthropic are pure-Python; reportlab/openpyxl are optional exports
+# Requirements — keep this list lean; unused heavy packages cause build failures
 requirements = python3,\
     kivy==2.3.0,\
     kivymd==1.2.0,\
@@ -35,35 +34,31 @@ android.permissions = \
     INTERNET,\
     ACCESS_NETWORK_STATE
 
-# Android SDK / NDK — buildozer will download these automatically
+# Android SDK/NDK versions — pinned for reproducibility
 android.api = 33
 android.minapi = 21
 android.ndk = 25b
 android.sdk = 33
 android.ndk_api = 21
 
-# Architecture — armeabi-v7a covers most Android phones;
-# add arm64-v8a for 64-bit phones (makes APK larger but broader support)
-android.archs = arm64-v8a, armeabi-v7a
+# Single arch for faster/more reliable CI builds.
+# arm64-v8a covers all modern Android phones (2017+).
+# Add armeabi-v7a later if you need to support very old devices.
+android.archs = arm64-v8a
 
-# Enable AndroidX
+# AndroidX required by modern KivyMD
 android.enable_androidx = True
 
 # Orientation
 orientation = portrait
 
-# Presplash / icon — replace these with your own files if available
+# Presplash / icon — uncomment and add files to use custom branding
 #presplash.filename = %(source.dir)s/presplash.png
 #icon.filename = %(source.dir)s/icon.png
 
-# Gradle / build
-android.gradle_dependencies =
-
-# Logcat filter during debug
-android.logcat_filters = *:S python:D
-
-# p4a branch
-p4a.branch = develop
+# Do NOT set p4a.branch — let buildozer use its own pinned p4a version.
+# Setting it to 'develop' pulls the latest unpinned commit which often breaks.
+# p4a.branch = develop
 
 [buildozer]
 
