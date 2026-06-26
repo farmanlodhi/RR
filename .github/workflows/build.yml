@@ -1,4 +1,5 @@
 name: Build Android APK
+
 on:
   push:
     branches: [ main, master ]
@@ -7,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     steps:
       - uses: actions/checkout@v4
 
@@ -14,13 +16,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
-      # Use Java 11 — required by buildozer/p4a
-      - name: Set up Java 11
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '11'
 
       - name: Install system dependencies
         run: |
@@ -34,6 +29,7 @@ jobs:
             autoconf automake libtool pkg-config \
             zlib1g-dev libncurses5-dev libncursesw5-dev \
             cmake lld ccache \
+            openjdk-17-jdk \
             libltdl-dev libgdbm-dev liblzma-dev libreadline-dev
 
       - name: Install Buildozer and Cython
@@ -41,8 +37,7 @@ jobs:
           pip install --upgrade pip wheel setuptools
           pip install buildozer "cython<3"
 
-      # Cache restored BEFORE we write licenses into it
-      - name: Cache Buildozer directory
+      - name: Cache Buildozer global directory
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
@@ -50,22 +45,49 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      # License step AFTER cache restore so files aren't overwritten
-      - name: Accept Android SDK licences
+      - name: Accept Android SDK licences (write BEFORE build)
         run: |
-          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
-          printf '8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
-          printf '84831b9409646a918e30573bab4c9c91346d8abd\n' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
-          printf 'd975f751698a77b662f1254ddbeed3901e976f5a\n' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
-          echo "Licence files written:"
-          ls -la ~/.buildozer/android/platform/android-sdk/licenses/
+          # Write licence files to ALL possible SDK locations Buildozer might use
+          for SDK_DIR in \
+            "$HOME/.buildozer/android/platform/android-sdk" \
+            "$HOME/.buildozer/android/platform/android-sdk-23" \
+            "/usr/local/lib/android/sdk" \
+            "$ANDROID_SDK_ROOT"; do
+            mkdir -p "$SDK_DIR/licenses"
+            # android-sdk-license — all current hashes (2025)
+            printf '%s\n' \
+              '8933bad161af4178b1185d1a37fbf41ea5269c55' \
+              'd56f5187479451eabf01fb78af6dfcb131a6481e' \
+              '24333f8a63b6825ea9c5514f83c2829b004d1fee' \
+              > "$SDK_DIR/licenses/android-sdk-license"
+            # android-sdk-preview-license
+            printf '%s\n' \
+              '84831b9409646a918e30573bab4c9c91346d8abd' \
+              > "$SDK_DIR/licenses/android-sdk-preview-license"
+            # intel-android-extra-license
+            printf '%s\n' \
+              'd975f751698a77b662f1254ddbeed3901e976f5a' \
+              > "$SDK_DIR/licenses/intel-android-extra-license"
+            # google-gdk-license
+            printf '%s\n' \
+              '33b6a2b64607f11b759f320ef9dff4ae5c47d97a' \
+              > "$SDK_DIR/licenses/google-gdk-license"
+          done
+          echo "Licence files written to all SDK dirs."
 
       - name: Build APK
+        env:
+          JAVA_OPTS: "-Xmx4g"
         run: |
-          buildozer -v android debug 2>&1 | tee build.log
+          # Pipe 'yes' so any interactive licence prompt is auto-accepted
+          yes | buildozer -v android debug 2>&1 | tee build.log
+          # 'yes |' can cause a non-zero exit; check for APK directly
+          if ls bin/*.apk 1> /dev/null 2>&1; then
+            echo "✅ APK built successfully"
+          else
+            echo "❌ APK not found — see build.log above"
+            exit 1
+          fi
 
       - name: Find APK
         if: always()
@@ -76,8 +98,8 @@ jobs:
           echo "=== Contents of bin/ ==="
           ls -la bin/ 2>/dev/null || echo "bin/ does not exist"
           echo ""
-          echo "=== Last 50 lines of build log ==="
-          tail -50 build.log || true
+          echo "=== Last 80 lines of build log ==="
+          tail -80 build.log || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
