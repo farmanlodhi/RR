@@ -75,13 +75,9 @@ jobs:
             rm -rf /tmp/cmdline-tools-raw /tmp/cmdline-tools.zip
           fi
 
-          # Legacy symlink that older Buildozer versions look for
           mkdir -p "$SDK_ROOT/tools/bin"
           ln -sf "$CMDLINE_DIR/latest/bin/sdkmanager" "$SDK_ROOT/tools/bin/sdkmanager" || true
-
-          echo "Java in use:"
           java -version
-          echo "sdkmanager path:"
           ls -la "$SDK_ROOT/tools/bin/sdkmanager"
 
       - name: Accept Android SDK licences
@@ -96,8 +92,6 @@ jobs:
             > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
           printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
             > "$ANDROID_SDK_ROOT/licenses/intel-android-extra-license"
-          echo "Licence files:"
-          ls -la "$ANDROID_SDK_ROOT/licenses/"
 
       - name: Install required SDK packages
         run: |
@@ -109,25 +103,50 @@ jobs:
             "ndk;25.2.9519653"
 
       - name: Build APK
+        # pipefail so that a Buildozer failure isn't hidden by tee
         run: |
+          set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
+          echo "EXIT_CODE=$?" >> $GITHUB_ENV
 
-      - name: Find APK
+      - name: Show full build log on failure
         if: always()
         run: |
-          echo "=== APK search ==="
-          find . -name "*.apk" 2>/dev/null || echo "No APK found"
-          echo "=== bin/ contents ==="
+          echo "============================================================"
+          echo "  FULL BUILD LOG"
+          echo "============================================================"
+          cat build.log || true
+
+      - name: Locate APK and diagnose missing output
+        if: always()
+        run: |
+          echo "=== bin/ directory ==="
           ls -la bin/ 2>/dev/null || echo "bin/ does not exist"
-          echo "=== Last 100 lines of build log ==="
-          tail -100 build.log || true
+
+          echo ""
+          echo "=== All APK files anywhere in workspace ==="
+          find . -name "*.apk" 2>/dev/null || echo "None found"
+
+          echo ""
+          echo "=== python-for-android dist directory ==="
+          find ~/.buildozer -name "*.apk" 2>/dev/null | head -20 || echo "None found in .buildozer"
+
+          echo ""
+          echo "=== Gradle build output ==="
+          find ~/.buildozer -name "build" -type d 2>/dev/null | head -10
+
+          echo ""
+          echo "=== Last ERROR lines in log ==="
+          grep -i "error\|exception\|failed\|traceback" build.log | tail -40 || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: receipt-reader-apk
-          path: bin/*.apk
+          path: |
+            bin/*.apk
+            **/*.apk
           if-no-files-found: warn
 
       - name: Upload build log
