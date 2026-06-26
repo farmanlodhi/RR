@@ -24,7 +24,6 @@ import csv
 import json
 import re
 import shutil
-import threading
 from datetime import datetime
 import platform
 
@@ -36,12 +35,8 @@ except ImportError:
     CAMERA_AVAILABLE = False
     Logger.warning("Plyer not available - camera functionality disabled")
 
-try:
-    import openai
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-    Logger.warning("OpenAI not available - install with: pip install openai")
+# openai package is NOT required — API calls are made via requests directly.
+OPENAI_AVAILABLE = False   # kept for legacy branches that check this flag
 
 try:
     import base64
@@ -165,67 +160,10 @@ class AIConfig:
 class InvoiceExtractor:
     """
     Extract receipt/invoice data using an AI Vision model.
-    Uses whatever provider the user has configured in AIConfig.
-    Anthropic Claude is called via its own SDK; all others are called
-    through the openai-compatible client.
+    All API calls are made with the 'requests' library so no
+    openai or anthropic SDK is needed on the device.
     """
 
-    def __init__(self):
-        self.client = None
-        self._build_client()
-
-    def _build_client(self):
-        """(Re)initialise the API client from current AIConfig."""
-        cfg = AIConfig.get()
-        self.client = None
-
-        if not cfg.is_configured:
-            Logger.warning("InvoiceExtractor: AI not configured — open Menu > AI Settings")
-            return
-
-        if cfg.provider == "Anthropic Claude":
-            # Use Anthropic SDK if available; fall back to openai-compat endpoint
-            try:
-                import anthropic
-                self.client = anthropic.Anthropic(api_key=cfg.api_key)
-                self._mode = "anthropic"
-                Logger.info("InvoiceExtractor: Anthropic client ready")
-            except ImportError:
-                Logger.warning("InvoiceExtractor: anthropic SDK not installed; "
-                               "falling back to openai-compat endpoint")
-                self._init_openai_compat(cfg)
-        else:
-            self._init_openai_compat(cfg)
-
-    def _init_openai_compat(self, cfg):
-        if not OPENAI_AVAILABLE:
-            Logger.error("InvoiceExtractor: openai package not installed")
-            return
-        try:
-            self.client = openai.OpenAI(
-                api_key=cfg.api_key,
-                base_url=cfg.base_url,
-            )
-            self._mode = "openai"
-            Logger.info(f"InvoiceExtractor: OpenAI-compat client ready ({cfg.base_url})")
-        except Exception as e:
-            Logger.error(f"InvoiceExtractor: client init failed: {e}")
-            self.client = None
-
-    def reload(self):
-        """Call this after the user saves new AI settings."""
-        self._build_client()
-
-    def encode_image(self, image_path):
-        """Encode image to base64 for API."""
-        try:
-            with open(image_path, "rb") as f:
-                return base64.b64encode(f.read()).decode("utf-8")
-        except Exception as e:
-            Logger.error(f"InvoiceExtractor: encode_image failed: {e}")
-            return None
-
-    # ── shared prompt ────────────────────────────────────────────────
     _PROMPT = (
         'Analyze this receipt or invoice image and extract the following '
         'information in JSON format:\n'
@@ -244,27 +182,52 @@ class InvoiceExtractor:
         'Return ONLY valid JSON, no extra text.'
     )
 
+    def __init__(self):
+        self._ready = False
+        self._check_ready()
+
+    def _check_ready(self):
+        cfg = AIConfig.get()
+        self._ready = cfg.is_configured
+        if not self._ready:
+            Logger.warning("InvoiceExtractor: AI not configured — open Menu > AI Settings")
+
+    def reload(self):
+        """Call this after the user saves new AI settings."""
+        self._check_ready()
+
+    @property
+    def client(self):
+        """Legacy property — truthy when extractor is ready."""
+        return self._ready or None
+
+    def encode_image(self, image_path):
+        try:
+            with open(image_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            Logger.error(f"InvoiceExtractor: encode_image failed: {e}")
+            return None
+
     def analyze_with_ai(self, image_path):
-        """Send image to AI and return parsed dict."""
-        if not self.client:
-            return {}
-        if not BASE64_AVAILABLE:
-            Logger.error("InvoiceExtractor: base64 not available")
+        """Send image to AI via raw HTTP and return parsed dict."""
+        import requests as _requests
+
+        if not self._ready:
             return {}
 
-        base64_image = self.encode_image(image_path)
-        if not base64_image:
+        b64 = self.encode_image(image_path)
+        if not b64:
             return {}
 
         cfg = AIConfig.get()
 
         try:
-            if getattr(self, "_mode", "openai") == "anthropic":
-                response_text = self._call_anthropic(base64_image, cfg)
+            if cfg.provider == "Anthropic Claude":
+                response_text = self._call_anthropic(b64, cfg, _requests)
             else:
-                response_text = self._call_openai_compat(base64_image, cfg)
+                response_text = self._call_openai_compat(b64, cfg, _requests)
 
-            # Parse JSON from response
             json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
             raw = json_match.group(0) if json_match else response_text
             result = json.loads(raw)
@@ -282,44 +245,61 @@ class InvoiceExtractor:
             return {}
         except Exception as e:
             Logger.error(f"InvoiceExtractor: API call failed: {e}")
-            raise   # re-raise so caller can show a useful error message
+            raise
 
-    def _call_openai_compat(self, base64_image, cfg):
-        response = self.client.chat.completions.create(
-            model=cfg.model,
-            messages=[{
+    def _call_openai_compat(self, b64, cfg, requests):
+        """Call any OpenAI-compatible endpoint (OpenAI, local, etc.)."""
+        url = cfg.base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": cfg.model,
+            "max_tokens": 500,
+            "temperature": 0.1,
+            "messages": [{
                 "role": "user",
                 "content": [
                     {"type": "text", "text": self._PROMPT},
                     {"type": "image_url",
-                     "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                     "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 ],
             }],
-            max_tokens=500,
-            temperature=0.1,
-        )
-        return response.choices[0].message.content.strip()
+        }
+        headers = {
+            "Authorization": f"Bearer {cfg.api_key}",
+            "Content-Type": "application/json",
+        }
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
 
-    def _call_anthropic(self, base64_image, cfg):
-        response = self.client.messages.create(
-            model=cfg.model,
-            max_tokens=500,
-            messages=[{
+    def _call_anthropic(self, b64, cfg, requests):
+        """Call Anthropic Messages API directly."""
+        url = "https://api.anthropic.com/v1/messages"
+        payload = {
+            "model": cfg.model,
+            "max_tokens": 500,
+            "messages": [{
                 "role": "user",
                 "content": [
                     {"type": "image",
                      "source": {"type": "base64",
                                 "media_type": "image/jpeg",
-                                "data": base64_image}},
+                                "data": b64}},
                     {"type": "text", "text": self._PROMPT},
                 ],
             }],
-        )
-        return response.content[0].text.strip()
+        }
+        headers = {
+            "x-api-key": cfg.api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        r.raise_for_status()
+        return r.json()["content"][0]["text"].strip()
 
     def extract_invoice_data(self, image_path):
         """Public entry point."""
-        if not self.client:
+        if not self._ready:
             Logger.warning("InvoiceExtractor: client not ready — check AI Settings")
             return {}
         return self.analyze_with_ai(image_path)
@@ -340,6 +320,7 @@ class CameraScreen(MDScreen):
         self.saved_invoices_state = []  # Track saved state to detect changes
         
         from kivy.metrics import dp
+        from kivymd.uix.chip import MDChip
 
         # Main layout with top app bar
         main_layout = MDBoxLayout(orientation='vertical', spacing=0)
@@ -424,7 +405,6 @@ class CameraScreen(MDScreen):
             height=dp(48),
             pos_hint={'center_x': 0.5},
             opacity=0,
-            disabled=True,
             font_size="15sp",
             md_bg_color=(1.0, 0.6, 0.0, 1),  # Amber accent
         )
@@ -470,7 +450,6 @@ class CameraScreen(MDScreen):
             size_hint_y=None,
             height=dp(32),
         )
-        layout.add_widget(table_label)  # was missing — label never showed
         
         # Scroll view for table
         self.table_scroll = MDScrollView(size_hint_y=None, height=400)
@@ -686,55 +665,51 @@ class CameraScreen(MDScreen):
             test_label.text = "Testing…"
             test_label.theme_text_color = "Secondary"
 
-            def do_test():
+            def do_test(dt):
+                import requests as _requests
+
                 key = api_key_field.text.strip()
                 model = model_field.text.strip()
                 url = base_url_field.text.strip()
                 provider = self._selected_provider
 
                 if not key or not model or not url:
-                    Clock.schedule_once(lambda dt: setattr(test_label, 'text',
-                        "⚠  Fill in all fields before testing.") or
-                        setattr(test_label, 'theme_text_color', "Error"), 0)
+                    test_label.text = "⚠  Fill in all fields before testing."
+                    test_label.theme_text_color = "Error"
                     return
 
                 try:
                     if provider == "Anthropic Claude":
-                        try:
-                            import anthropic
-                            client = anthropic.Anthropic(api_key=key)
-                            client.messages.create(
-                                model=model,
-                                max_tokens=10,
-                                messages=[{"role": "user", "content": "Hi"}],
-                            )
-                        except ImportError:
-                            if not OPENAI_AVAILABLE:
-                                raise RuntimeError("Neither anthropic nor openai SDK installed")
-                            client = openai.OpenAI(api_key=key, base_url=url)
-                            client.chat.completions.create(
-                                model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=5
-                            )
-                    else:
-                        if not OPENAI_AVAILABLE:
-                            raise RuntimeError("openai SDK not installed")
-                        client = openai.OpenAI(api_key=key, base_url=url)
-                        client.chat.completions.create(
-                            model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=5
+                        r = _requests.post(
+                            "https://api.anthropic.com/v1/messages",
+                            json={"model": model, "max_tokens": 10,
+                                  "messages": [{"role": "user", "content": "Hi"}]},
+                            headers={"x-api-key": key,
+                                     "anthropic-version": "2023-06-01",
+                                     "Content-Type": "application/json"},
+                            timeout=15,
                         )
+                        r.raise_for_status()
+                    else:
+                        r = _requests.post(
+                            url.rstrip("/") + "/chat/completions",
+                            json={"model": model, "max_tokens": 5,
+                                  "messages": [{"role": "user", "content": "Hi"}]},
+                            headers={"Authorization": f"Bearer {key}",
+                                     "Content-Type": "application/json"},
+                            timeout=15,
+                        )
+                        r.raise_for_status()
 
-                    def on_success(dt):
-                        test_label.text = "✓  Connection successful!"
-                        test_label.theme_text_color = "Custom"
-                        test_label.text_color = (0.0, 0.6, 0.2, 1)
-                    Clock.schedule_once(on_success, 0)
-
+                    test_label.text = "✓  Connection successful!"
+                    test_label.theme_text_color = "Custom"
+                    test_label.text_color = (0.0, 0.6, 0.2, 1)
                 except Exception as e:
                     short = str(e)[:120]
-                    Clock.schedule_once(lambda dt: setattr(test_label, 'text', f"✗  {short}") or
-                        setattr(test_label, 'theme_text_color', "Error"), 0)
+                    test_label.text = f"✗  {short}"
+                    test_label.theme_text_color = "Error"
 
-            threading.Thread(target=do_test, daemon=True).start()
+            Clock.schedule_once(do_test, 0.1)
 
         dialog = MDDialog(
             title="AI Settings",
@@ -821,10 +796,10 @@ class CameraScreen(MDScreen):
     
     def take_photo(self, instance):
         """Take a photo using the device camera or file picker"""
-        from kivy.utils import platform as kivy_platform
-        is_android = (kivy_platform == 'android')
-
-        if CAMERA_AVAILABLE and is_android:
+        # On desktop/Windows, use file picker as fallback
+        is_desktop = platform.system() in ['Windows', 'Linux', 'Darwin']
+        
+        if CAMERA_AVAILABLE and not is_desktop:
             # Try camera on mobile devices
             try:
                 camera.take_picture(
@@ -855,7 +830,6 @@ class CameraScreen(MDScreen):
             self.image_preview.source = filename
             self.image_preview.reload()
             self.extract_btn.opacity = 1
-            self.extract_btn.disabled = False
             Logger.info(f"Photo saved to: {filename}")
         else:
             self.show_error("Failed to capture photo")
@@ -892,37 +866,49 @@ class CameraScreen(MDScreen):
             auto_dismiss=False
         )
         dialog.open()
-
-        def run_extraction():
-            """Run in background thread — never touch UI here."""
+        
+        def process_extraction(dt):
             try:
+                # Extract invoice data using AI
                 invoice_data = self.extractor.extract_invoice_data(self.captured_image_path)
-            except Exception as e:
-                invoice_data = None
-                Clock.schedule_once(lambda dt: (
-                    dialog.dismiss(),
-                    self.show_error(f"AI analysis failed: {e}. You can still enter data manually."),
-                    self.show_extracted_data({
-                        'invoice_number': '', 'invoicee_name': '', 'date': '',
-                        'amount': '', 'tax': '', 'total': '', 'vendor': '', 'description': ''
-                    })
-                ), 0)
-                return
-
-            def on_done(dt):
+                
+                # Close loading dialog
                 dialog.dismiss()
+                
                 if not invoice_data or not any(invoice_data.values()):
+                    # If extraction failed or returned empty, show empty form
                     self.show_info("Could not extract data from image. Please enter data manually.")
-                    self.show_extracted_data({
-                        'invoice_number': '', 'invoicee_name': '', 'date': '',
-                        'amount': '', 'tax': '', 'total': '', 'vendor': '', 'description': ''
-                    })
+                    empty_data = {
+                        'invoice_number': '',
+                        'invoicee_name': '',
+                        'date': '',
+                        'amount': '',
+                        'tax': '',
+                        'total': '',
+                        'vendor': '',
+                        'description': ''
+                    }
+                    self.show_extracted_data(empty_data)
                 else:
+                    # Show extracted data dialog
                     self.show_extracted_data(invoice_data)
-
-            Clock.schedule_once(on_done, 0)
-
-        threading.Thread(target=run_extraction, daemon=True).start()
+            except Exception as e:
+                dialog.dismiss()
+                self.show_error(f"AI analysis failed: {e}. You can still enter data manually.")
+                # Show empty form as fallback
+                empty_data = {
+                    'invoice_number': '',
+                    'invoicee_name': '',
+                    'date': '',
+                    'amount': '',
+                    'tax': '',
+                    'total': '',
+                    'vendor': '',
+                    'description': ''
+                }
+                self.show_extracted_data(empty_data)
+        
+        Clock.schedule_once(process_extraction, 0.1)
     
     def show_extracted_data(self, data):
         """Show extracted data in a dialog for review/editing"""
@@ -2252,9 +2238,7 @@ class ReceiptReaderApp(MDApp):
         """Save the last opened file name"""
         try:
             last_file_path = self.get_last_opened_file_path()
-            dirpath = os.path.dirname(last_file_path)
-            if dirpath:
-                os.makedirs(dirpath, exist_ok=True)
+            os.makedirs(os.path.dirname(last_file_path), exist_ok=True)
             with open(last_file_path, 'w', encoding='utf-8') as f:
                 f.write(filename)
         except Exception as e:
@@ -2280,9 +2264,7 @@ class ReceiptReaderApp(MDApp):
     
     def save_invoices_to_json(self, invoices, filepath):
         """Save invoices to JSON file with image storage"""
-        dirpath = os.path.dirname(filepath)
-        if dirpath:
-            os.makedirs(dirpath, exist_ok=True)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         # Get project images directory
         project_images_dir = self.get_project_images_directory(filepath)
@@ -2351,9 +2333,7 @@ class ReceiptReaderApp(MDApp):
     
     def export_invoices_to_csv(self, invoices, filepath):
         """Export invoices to CSV file (without images)"""
-        dirpath = os.path.dirname(filepath)
-        if dirpath:
-            os.makedirs(dirpath, exist_ok=True)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         fieldnames = ['invoice_number', 'vendor', 'invoicee_name', 'date', 
                      'amount', 'tax', 'total', 'description']
@@ -2369,14 +2349,11 @@ class ReceiptReaderApp(MDApp):
     def export_invoices_to_excel(self, invoices, filepath):
         """Export invoices to Excel file"""
         try:
-            import openpyxl
             from openpyxl import Workbook
         except ImportError:
-            raise ImportError("openpyxl is required for Excel export. Install with: pip install openpyxl")
+            raise ImportError("openpyxl is not available on this device. Use CSV export instead.")
         
-        dirpath = os.path.dirname(filepath)
-        if dirpath:
-            os.makedirs(dirpath, exist_ok=True)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         wb = Workbook()
         ws = wb.active
@@ -2427,11 +2404,9 @@ class ReceiptReaderApp(MDApp):
             from reportlab.lib import colors
             from reportlab.platypus.flowables import HRFlowable
         except ImportError:
-            raise ImportError("reportlab is required for PDF export. Install with: pip install reportlab")
+            raise ImportError("PDF export is not available on this device. Use CSV export instead.")
         
-        dirpath = os.path.dirname(filepath)
-        if dirpath:
-            os.makedirs(dirpath, exist_ok=True)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         # Create PDF document with margins
         doc = SimpleDocTemplate(filepath, pagesize=letter, 
