@@ -30,12 +30,25 @@ jobs:
             zlib1g-dev libncurses5-dev libncursesw5-dev \
             cmake lld ccache \
             openjdk-17-jdk \
-            libltdl-dev libgdbm-dev liblzma-dev libreadline-dev
+            libltdl-dev libgdbm-dev liblzma-dev libreadline-dev \
+            libfreetype6-dev libpng-dev
 
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip wheel setuptools
           pip install buildozer "cython<3"
+
+      # Accept licences BEFORE restoring cache so they are present
+      # whether the cache hits or misses.
+      - name: Pre-accept Android SDK licences
+        run: |
+          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
+          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
+          printf '\n84831b9409646a918e30573bab4c9c91346d8abd' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
+          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
 
       - name: Cache Buildozer global directory
         uses: actions/cache@v4
@@ -45,59 +58,30 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      - name: Accept Android SDK licences (write BEFORE build)
+      # Re-write licence files after cache restore in case cache overwrote them
+      - name: Ensure Android SDK licences survive cache restore
         run: |
-          # Write licence files to ALL possible SDK locations Buildozer might use
-          for SDK_DIR in \
-            "$HOME/.buildozer/android/platform/android-sdk" \
-            "$HOME/.buildozer/android/platform/android-sdk-23" \
-            "/usr/local/lib/android/sdk" \
-            "$ANDROID_SDK_ROOT"; do
-            mkdir -p "$SDK_DIR/licenses"
-            # android-sdk-license — all current hashes (2025)
-            printf '%s\n' \
-              '8933bad161af4178b1185d1a37fbf41ea5269c55' \
-              'd56f5187479451eabf01fb78af6dfcb131a6481e' \
-              '24333f8a63b6825ea9c5514f83c2829b004d1fee' \
-              > "$SDK_DIR/licenses/android-sdk-license"
-            # android-sdk-preview-license
-            printf '%s\n' \
-              '84831b9409646a918e30573bab4c9c91346d8abd' \
-              > "$SDK_DIR/licenses/android-sdk-preview-license"
-            # intel-android-extra-license
-            printf '%s\n' \
-              'd975f751698a77b662f1254ddbeed3901e976f5a' \
-              > "$SDK_DIR/licenses/intel-android-extra-license"
-            # google-gdk-license
-            printf '%s\n' \
-              '33b6a2b64607f11b759f320ef9dff4ae5c47d97a' \
-              > "$SDK_DIR/licenses/google-gdk-license"
-          done
-          echo "Licence files written to all SDK dirs."
+          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
+          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
+          printf '\n84831b9409646a918e30573bab4c9c91346d8abd' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
+          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
+            > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
+          echo "Licence files:"
+          ls -la ~/.buildozer/android/platform/android-sdk/licenses/
 
       - name: Build APK
-        env:
-          JAVA_OPTS: "-Xmx4g"
         run: |
-          # Pipe 'yes' so any interactive licence prompt is auto-accepted
-          yes | buildozer -v android debug 2>&1 | tee build.log
-          # 'yes |' can cause a non-zero exit; check for APK directly
-          if ls bin/*.apk 1> /dev/null 2>&1; then
-            echo "✅ APK built successfully"
-          else
-            echo "❌ APK not found — see build.log above"
-            exit 1
-          fi
+          buildozer -v android debug 2>&1 | tee build.log
 
       - name: Find APK
         if: always()
         run: |
-          echo "=== Searching for APK files ==="
+          echo "=== APK search ==="
           find . -name "*.apk" 2>/dev/null || echo "No APK found"
-          echo ""
-          echo "=== Contents of bin/ ==="
+          echo "=== bin/ contents ==="
           ls -la bin/ 2>/dev/null || echo "bin/ does not exist"
-          echo ""
           echo "=== Last 80 lines of build log ==="
           tail -80 build.log || true
 
