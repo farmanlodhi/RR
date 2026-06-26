@@ -9,20 +9,25 @@ source.include_exts = py,png,jpg,kv,atlas,json
 
 version = 1.0.0
 
-# Pure-Python packages only — no packages with unported C extensions.
-# openai/anthropic SDKs are NOT listed here; the app calls the APIs
-# directly via the 'requests' package instead (see InvoiceExtractor).
+# Only packages that have a python-for-android recipe or are pure-Python
+# with no compiled C extensions.
+#
+# REMOVED (no p4a recipe, C extensions fail cross-compilation):
+#   openai, reportlab, openpyxl
+#
+# reportlab and openpyxl are imported inside try/except in the app so
+# their absence won't crash anything — export buttons will just show
+# an "install required" message on devices that lack them.
+#
+# kivy and kivymd are left unpinned so p4a picks its own known-good versions.
 requirements = python3,\
-    kivy==2.2.1,\
-    kivymd==1.1.1,\
+    kivy,\
+    kivymd,\
     plyer,\
     pillow,\
     requests,\
     certifi,\
-    charset_normalizer,\
-    urllib3,\
-    openpyxl,\
-    reportlab
+    urllib3
 
 android.permissions = \
     CAMERA,\
