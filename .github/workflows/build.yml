@@ -9,6 +9,10 @@ jobs:
   build:
     runs-on: ubuntu-22.04
 
+    env:
+      ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
+      ANDROID_HOME:     /home/runner/.buildozer/android/platform/android-sdk
+
     steps:
       - uses: actions/checkout@v4
 
@@ -21,7 +25,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            git zip unzip curl \
+            git zip unzip curl wget \
             python3-pip python3-dev \
             build-essential \
             libssl-dev libffi-dev \
@@ -38,38 +42,68 @@ jobs:
           pip install --upgrade pip wheel setuptools
           pip install buildozer "cython<3"
 
-      # Accept licences BEFORE restoring cache so they are present
-      # whether the cache hits or misses.
-      - name: Pre-accept Android SDK licences
-        run: |
-          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
-          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
-          printf '\n84831b9409646a918e30573bab4c9c91346d8abd' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
-          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
-
-      - name: Cache Buildozer global directory
+      - name: Cache Buildozer directory
         uses: actions/cache@v4
+        id: buildozer-cache
         with:
           path: ~/.buildozer
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      # Re-write licence files after cache restore in case cache overwrote them
-      - name: Ensure Android SDK licences survive cache restore
+      # Install the Android SDK cmdline-tools manually so sdkmanager is available
+      # at the exact path Buildozer expects, regardless of cache state.
+      - name: Install Android SDK cmdline-tools
         run: |
-          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
+          SDK_ROOT="$ANDROID_SDK_ROOT"
+          CMDLINE_DIR="$SDK_ROOT/cmdline-tools"
+          SDKMANAGER="$CMDLINE_DIR/latest/bin/sdkmanager"
+
+          if [ -f "$SDKMANAGER" ]; then
+            echo "sdkmanager already present, skipping download."
+          else
+            echo "Downloading Android cmdline-tools..."
+            mkdir -p "$CMDLINE_DIR"
+            wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" \
+              -O /tmp/cmdline-tools.zip
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-raw
+            # Google zips the tools into a folder called "cmdline-tools" inside
+            mv /tmp/cmdline-tools-raw/cmdline-tools "$CMDLINE_DIR/latest"
+            rm -rf /tmp/cmdline-tools-raw /tmp/cmdline-tools.zip
+            echo "cmdline-tools installed at $CMDLINE_DIR/latest"
+          fi
+
+          # Also create the legacy tools/bin/sdkmanager symlink that older
+          # Buildozer versions look for
+          mkdir -p "$SDK_ROOT/tools/bin"
+          ln -sf "$CMDLINE_DIR/latest/bin/sdkmanager" "$SDK_ROOT/tools/bin/sdkmanager" || true
+          echo "Symlink: $SDK_ROOT/tools/bin/sdkmanager -> $CMDLINE_DIR/latest/bin/sdkmanager"
+          ls -la "$SDK_ROOT/tools/bin/sdkmanager"
+
+      - name: Accept Android SDK licences
+        run: |
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
+
+          # Also write the licence files directly as a belt-and-braces measure
+          mkdir -p "$ANDROID_SDK_ROOT/licenses"
           printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
+            > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
           printf '\n84831b9409646a918e30573bab4c9c91346d8abd' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
+            > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
           printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
-          echo "Licence files:"
-          ls -la ~/.buildozer/android/platform/android-sdk/licenses/
+            > "$ANDROID_SDK_ROOT/licenses/intel-android-extra-license"
+          echo "Licence files written:"
+          ls -la "$ANDROID_SDK_ROOT/licenses/"
+
+      - name: Install required SDK packages
+        run: |
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" \
+            "build-tools;33.0.2" \
+            "platforms;android-33" \
+            "ndk;25.2.9519653"
 
       - name: Build APK
         run: |
@@ -82,8 +116,8 @@ jobs:
           find . -name "*.apk" 2>/dev/null || echo "No APK found"
           echo "=== bin/ contents ==="
           ls -la bin/ 2>/dev/null || echo "bin/ does not exist"
-          echo "=== Last 80 lines of build log ==="
-          tail -80 build.log || true
+          echo "=== Last 100 lines of build log ==="
+          tail -100 build.log || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
