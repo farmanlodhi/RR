@@ -24,6 +24,7 @@ import csv
 import json
 import re
 import shutil
+import threading
 from datetime import datetime
 import platform
 
@@ -339,7 +340,6 @@ class CameraScreen(MDScreen):
         self.saved_invoices_state = []  # Track saved state to detect changes
         
         from kivy.metrics import dp
-        from kivymd.uix.chip import MDChip
 
         # Main layout with top app bar
         main_layout = MDBoxLayout(orientation='vertical', spacing=0)
@@ -424,6 +424,7 @@ class CameraScreen(MDScreen):
             height=dp(48),
             pos_hint={'center_x': 0.5},
             opacity=0,
+            disabled=True,
             font_size="15sp",
             md_bg_color=(1.0, 0.6, 0.0, 1),  # Amber accent
         )
@@ -469,6 +470,7 @@ class CameraScreen(MDScreen):
             size_hint_y=None,
             height=dp(32),
         )
+        layout.add_widget(table_label)  # was missing — label never showed
         
         # Scroll view for table
         self.table_scroll = MDScrollView(size_hint_y=None, height=400)
@@ -684,15 +686,16 @@ class CameraScreen(MDScreen):
             test_label.text = "Testing…"
             test_label.theme_text_color = "Secondary"
 
-            def do_test(dt):
+            def do_test():
                 key = api_key_field.text.strip()
                 model = model_field.text.strip()
                 url = base_url_field.text.strip()
                 provider = self._selected_provider
 
                 if not key or not model or not url:
-                    test_label.text = "⚠  Fill in all fields before testing."
-                    test_label.theme_text_color = "Error"
+                    Clock.schedule_once(lambda dt: setattr(test_label, 'text',
+                        "⚠  Fill in all fields before testing.") or
+                        setattr(test_label, 'theme_text_color', "Error"), 0)
                     return
 
                 try:
@@ -706,7 +709,6 @@ class CameraScreen(MDScreen):
                                 messages=[{"role": "user", "content": "Hi"}],
                             )
                         except ImportError:
-                            # Fall back to openai-compat
                             if not OPENAI_AVAILABLE:
                                 raise RuntimeError("Neither anthropic nor openai SDK installed")
                             client = openai.OpenAI(api_key=key, base_url=url)
@@ -720,15 +722,19 @@ class CameraScreen(MDScreen):
                         client.chat.completions.create(
                             model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=5
                         )
-                    test_label.text = "✓  Connection successful!"
-                    test_label.theme_text_color = "Custom"
-                    test_label.text_color = (0.0, 0.6, 0.2, 1)
+
+                    def on_success(dt):
+                        test_label.text = "✓  Connection successful!"
+                        test_label.theme_text_color = "Custom"
+                        test_label.text_color = (0.0, 0.6, 0.2, 1)
+                    Clock.schedule_once(on_success, 0)
+
                 except Exception as e:
                     short = str(e)[:120]
-                    test_label.text = f"✗  {short}"
-                    test_label.theme_text_color = "Error"
+                    Clock.schedule_once(lambda dt: setattr(test_label, 'text', f"✗  {short}") or
+                        setattr(test_label, 'theme_text_color', "Error"), 0)
 
-            Clock.schedule_once(do_test, 0.1)
+            threading.Thread(target=do_test, daemon=True).start()
 
         dialog = MDDialog(
             title="AI Settings",
@@ -815,10 +821,10 @@ class CameraScreen(MDScreen):
     
     def take_photo(self, instance):
         """Take a photo using the device camera or file picker"""
-        # On desktop/Windows, use file picker as fallback
-        is_desktop = platform.system() in ['Windows', 'Linux', 'Darwin']
-        
-        if CAMERA_AVAILABLE and not is_desktop:
+        from kivy.utils import platform as kivy_platform
+        is_android = (kivy_platform == 'android')
+
+        if CAMERA_AVAILABLE and is_android:
             # Try camera on mobile devices
             try:
                 camera.take_picture(
@@ -849,6 +855,7 @@ class CameraScreen(MDScreen):
             self.image_preview.source = filename
             self.image_preview.reload()
             self.extract_btn.opacity = 1
+            self.extract_btn.disabled = False
             Logger.info(f"Photo saved to: {filename}")
         else:
             self.show_error("Failed to capture photo")
@@ -885,49 +892,37 @@ class CameraScreen(MDScreen):
             auto_dismiss=False
         )
         dialog.open()
-        
-        def process_extraction(dt):
+
+        def run_extraction():
+            """Run in background thread — never touch UI here."""
             try:
-                # Extract invoice data using AI
                 invoice_data = self.extractor.extract_invoice_data(self.captured_image_path)
-                
-                # Close loading dialog
-                dialog.dismiss()
-                
-                if not invoice_data or not any(invoice_data.values()):
-                    # If extraction failed or returned empty, show empty form
-                    self.show_info("Could not extract data from image. Please enter data manually.")
-                    empty_data = {
-                        'invoice_number': '',
-                        'invoicee_name': '',
-                        'date': '',
-                        'amount': '',
-                        'tax': '',
-                        'total': '',
-                        'vendor': '',
-                        'description': ''
-                    }
-                    self.show_extracted_data(empty_data)
-                else:
-                    # Show extracted data dialog
-                    self.show_extracted_data(invoice_data)
             except Exception as e:
+                invoice_data = None
+                Clock.schedule_once(lambda dt: (
+                    dialog.dismiss(),
+                    self.show_error(f"AI analysis failed: {e}. You can still enter data manually."),
+                    self.show_extracted_data({
+                        'invoice_number': '', 'invoicee_name': '', 'date': '',
+                        'amount': '', 'tax': '', 'total': '', 'vendor': '', 'description': ''
+                    })
+                ), 0)
+                return
+
+            def on_done(dt):
                 dialog.dismiss()
-                self.show_error(f"AI analysis failed: {e}. You can still enter data manually.")
-                # Show empty form as fallback
-                empty_data = {
-                    'invoice_number': '',
-                    'invoicee_name': '',
-                    'date': '',
-                    'amount': '',
-                    'tax': '',
-                    'total': '',
-                    'vendor': '',
-                    'description': ''
-                }
-                self.show_extracted_data(empty_data)
-        
-        Clock.schedule_once(process_extraction, 0.1)
+                if not invoice_data or not any(invoice_data.values()):
+                    self.show_info("Could not extract data from image. Please enter data manually.")
+                    self.show_extracted_data({
+                        'invoice_number': '', 'invoicee_name': '', 'date': '',
+                        'amount': '', 'tax': '', 'total': '', 'vendor': '', 'description': ''
+                    })
+                else:
+                    self.show_extracted_data(invoice_data)
+
+            Clock.schedule_once(on_done, 0)
+
+        threading.Thread(target=run_extraction, daemon=True).start()
     
     def show_extracted_data(self, data):
         """Show extracted data in a dialog for review/editing"""
@@ -2257,7 +2252,9 @@ class ReceiptReaderApp(MDApp):
         """Save the last opened file name"""
         try:
             last_file_path = self.get_last_opened_file_path()
-            os.makedirs(os.path.dirname(last_file_path), exist_ok=True)
+            dirpath = os.path.dirname(last_file_path)
+            if dirpath:
+                os.makedirs(dirpath, exist_ok=True)
             with open(last_file_path, 'w', encoding='utf-8') as f:
                 f.write(filename)
         except Exception as e:
@@ -2283,7 +2280,9 @@ class ReceiptReaderApp(MDApp):
     
     def save_invoices_to_json(self, invoices, filepath):
         """Save invoices to JSON file with image storage"""
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        dirpath = os.path.dirname(filepath)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         
         # Get project images directory
         project_images_dir = self.get_project_images_directory(filepath)
@@ -2352,7 +2351,9 @@ class ReceiptReaderApp(MDApp):
     
     def export_invoices_to_csv(self, invoices, filepath):
         """Export invoices to CSV file (without images)"""
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        dirpath = os.path.dirname(filepath)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         
         fieldnames = ['invoice_number', 'vendor', 'invoicee_name', 'date', 
                      'amount', 'tax', 'total', 'description']
@@ -2373,7 +2374,9 @@ class ReceiptReaderApp(MDApp):
         except ImportError:
             raise ImportError("openpyxl is required for Excel export. Install with: pip install openpyxl")
         
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        dirpath = os.path.dirname(filepath)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         
         wb = Workbook()
         ws = wb.active
@@ -2426,7 +2429,9 @@ class ReceiptReaderApp(MDApp):
         except ImportError:
             raise ImportError("reportlab is required for PDF export. Install with: pip install reportlab")
         
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        dirpath = os.path.dirname(filepath)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         
         # Create PDF document with margins
         doc = SimpleDocTemplate(filepath, pagesize=letter, 
