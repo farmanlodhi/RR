@@ -32,6 +32,15 @@ android.archs = arm64-v8a
 
 android.enable_androidx = True
 
+# ── Pin python-for-android to the last stable recipe-based release ──
+# (v2024.01.21). Newer p4a (2026.x) switched to a Python 3.14 wheel-based
+# build that requires Android wheels on PyPI, which core packages like
+# pyjnius and pillow do not publish — causing "No matching distribution
+# found" failures. The pinned release compiles everything from source
+# using its own recipes and is the proven combo with NDK 25b + Kivy 2.3.0.
+p4a.branch = master
+p4a.commit = 957a3e5f8c270f7aa648ba185e5a68c1077a798d
+
 orientation = portrait
 
 #presplash.filename = %(source.dir)s/presplash.png
