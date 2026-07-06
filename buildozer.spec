@@ -21,9 +21,13 @@ android.permissions = CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,INTERN
 android.accept_sdk_license = True
 
 android.api = 33
-android.minapi = 21
+# minapi/ndk_api 26 (Android 8.0+) is required: CPython 3.11.5 (built by
+# the pinned p4a) unconditionally compiles the grp module, which uses
+# getgrent/setgrent — functions Android's libc only provides from API 26.
+# At ndk_api 21 the build fails with "implicit declaration of setgrent".
+android.minapi = 26
 android.ndk = 25b
-android.ndk_api = 21
+android.ndk_api = 26
 
 # Pin build-tools to 33.0.2 — avoids the newer versions that hit licence issues
 android.build_tools_version = 33.0.2
