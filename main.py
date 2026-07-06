@@ -54,7 +54,55 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-    Logger.warning("PIL not available - image processing disabled")
+    Logger.warning("PIL not available - using built-in header parser for image sizes")
+
+
+def get_image_dimensions(image_path):
+    """Return (width, height) of a JPEG or PNG without needing Pillow.
+    Uses PIL when available; otherwise parses the file header directly.
+    Returns None if dimensions cannot be determined."""
+    if PIL_AVAILABLE:
+        try:
+            with PILImage.open(image_path) as img:
+                return img.size
+        except Exception:
+            pass
+    try:
+        with open(image_path, 'rb') as f:
+            head = f.read(26)
+            # PNG: dimensions live in the IHDR chunk at fixed offsets
+            if head.startswith(b'\x89PNG\r\n\x1a\n'):
+                import struct
+                w, h = struct.unpack('>II', head[16:24])
+                return (w, h)
+            # JPEG: walk the segment markers until a Start-Of-Frame segment
+            if head.startswith(b'\xff\xd8'):
+                import struct
+                f.seek(2)
+                while True:
+                    marker = f.read(2)
+                    if len(marker) < 2 or marker[0] != 0xFF:
+                        return None
+                    # skip padding bytes
+                    while marker[1] == 0xFF:
+                        nxt = f.read(1)
+                        if not nxt:
+                            return None
+                        marker = b'\xff' + nxt
+                    code = marker[1]
+                    # SOF0-SOF15 (excluding DHT/JPG/DAC markers c4, c8, cc)
+                    if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+                        f.read(3)  # length (2) + precision (1)
+                        h, w = struct.unpack('>HH', f.read(4))
+                        return (w, h)
+                    length_bytes = f.read(2)
+                    if len(length_bytes) < 2:
+                        return None
+                    seg_len = struct.unpack('>H', length_bytes)[0]
+                    f.seek(seg_len - 2, 1)
+    except Exception as e:
+        Logger.warning(f"get_image_dimensions failed for {image_path}: {e}")
+    return None
 
 
 class AIConfig:
@@ -2724,10 +2772,10 @@ class ReceiptReaderApp(MDApp):
                         story.append(Spacer(1, 0.2*inch))
                         continue
                     
-                    if PIL_AVAILABLE:
-                        # Open and resize image to standard size
-                        img = PILImage.open(image_path)
-                        img_width, img_height = img.size
+                    dims = get_image_dimensions(image_path)
+                    if dims:
+                        # Scale image proportionally to fit standard size
+                        img_width, img_height = dims
                         
                         # Calculate size maintaining aspect ratio, fitting within standard dimensions
                         ratio = min(standard_width / img_width, standard_height / img_height)
