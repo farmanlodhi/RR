@@ -56,7 +56,22 @@ jobs:
 
       - name: Build APK
         run: |
+          # pipefail: without it, `tee` masks buildozer's exit code and
+          # failed builds show green with no APK
+          set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Show failure context
+        if: failure()
+        run: |
+          echo "=========== Lines around 'Command failed' ==========="
+          grep -n -B 5 "Command failed" build.log | head -60 || true
+          echo ""
+          echo "=========== First real errors (excluding warnings) ==========="
+          grep -n -m 10 -E "error:|ERROR:|FAILED|Exception" build.log | head -20 || true
+          echo ""
+          echo "=========== Last 120 lines of build log ==========="
+          tail -120 build.log
 
       - name: Find APK
         if: always()
