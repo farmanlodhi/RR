@@ -9,18 +9,16 @@ source.include_exts = py,png,jpg,kv,atlas,json
 
 version = 1.0.0
 
-# NOTE: openai/anthropic SDKs removed — they depend on pydantic-core (Rust)
-# which python-for-android cannot compile. AI calls now use plain requests.
+# NOTE: openai/anthropic SDKs removed (pydantic-core/Rust won't build for
+# Android) — AI calls use plain requests. pillow removed too: PyPI ships no
+# Android wheels for it and the app now reads image sizes in pure Python.
 # IMPORTANT: keep this on ONE line — buildozer does not support backslash
 # line continuations and passes them literally into package names.
-requirements = python3,kivy==2.3.0,kivymd==1.2.0,plyer,pillow,requests,certifi,charset-normalizer,idna,urllib3,reportlab,openpyxl
+requirements = python3,kivy==2.3.0,kivymd==1.2.0,plyer,requests,certifi,charset-normalizer,idna,urllib3,reportlab,openpyxl
 
-android.permissions = \
-    CAMERA,\
-    READ_EXTERNAL_STORAGE,\
-    WRITE_EXTERNAL_STORAGE,\
-    INTERNET,\
-    ACCESS_NETWORK_STATE
+android.permissions = CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,INTERNET,ACCESS_NETWORK_STATE
+
+android.accept_sdk_license = True
 
 android.api = 33
 android.minapi = 21
