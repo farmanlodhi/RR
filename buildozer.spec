@@ -11,18 +11,9 @@ version = 1.0.0
 
 # NOTE: openai/anthropic SDKs removed — they depend on pydantic-core (Rust)
 # which python-for-android cannot compile. AI calls now use plain requests.
-requirements = python3,\
-    kivy==2.3.0,\
-    kivymd==1.2.0,\
-    plyer,\
-    pillow,\
-    requests,\
-    certifi,\
-    charset-normalizer,\
-    idna,\
-    urllib3,\
-    reportlab,\
-    openpyxl
+# IMPORTANT: keep this on ONE line — buildozer does not support backslash
+# line continuations and passes them literally into package names.
+requirements = python3,kivy==2.3.0,kivymd==1.2.0,plyer,pillow,requests,certifi,charset-normalizer,idna,urllib3,reportlab,openpyxl
 
 android.permissions = \
     CAMERA,\
