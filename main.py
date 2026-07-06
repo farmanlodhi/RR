@@ -35,8 +35,12 @@ except ImportError:
     CAMERA_AVAILABLE = False
     Logger.warning("Plyer not available - camera functionality disabled")
 
-# openai package is NOT required — API calls are made via requests directly.
-OPENAI_AVAILABLE = False   # kept for legacy branches that check this flag
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    Logger.warning("requests not available - AI features disabled")
 
 try:
     import base64
@@ -160,10 +164,49 @@ class AIConfig:
 class InvoiceExtractor:
     """
     Extract receipt/invoice data using an AI Vision model.
-    All API calls are made with the 'requests' library so no
-    openai or anthropic SDK is needed on the device.
+    Uses whatever provider the user has configured in AIConfig.
+    All providers are called with plain HTTP POST via `requests` —
+    no openai/anthropic SDKs needed (they don't compile for Android).
     """
 
+    REQUEST_TIMEOUT = 60  # seconds
+
+    def __init__(self):
+        self.client = None   # kept as a truthy "ready" flag for existing callers
+        self._mode = "openai"
+        self._build_client()
+
+    def _build_client(self):
+        """(Re)validate configuration from current AIConfig."""
+        cfg = AIConfig.get()
+        self.client = None
+
+        if not cfg.is_configured:
+            Logger.warning("InvoiceExtractor: AI not configured — open Menu > AI Settings")
+            return
+
+        if not REQUESTS_AVAILABLE:
+            Logger.error("InvoiceExtractor: requests package not installed")
+            return
+
+        self._mode = "anthropic" if cfg.provider == "Anthropic Claude" else "openai"
+        self.client = True   # ready
+        Logger.info(f"InvoiceExtractor: ready (mode={self._mode}, base_url={cfg.base_url})")
+
+    def reload(self):
+        """Call this after the user saves new AI settings."""
+        self._build_client()
+
+    def encode_image(self, image_path):
+        """Encode image to base64 for API."""
+        try:
+            with open(image_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            Logger.error(f"InvoiceExtractor: encode_image failed: {e}")
+            return None
+
+    # ── shared prompt ────────────────────────────────────────────────
     _PROMPT = (
         'Analyze this receipt or invoice image and extract the following '
         'information in JSON format:\n'
@@ -182,52 +225,27 @@ class InvoiceExtractor:
         'Return ONLY valid JSON, no extra text.'
     )
 
-    def __init__(self):
-        self._ready = False
-        self._check_ready()
-
-    def _check_ready(self):
-        cfg = AIConfig.get()
-        self._ready = cfg.is_configured
-        if not self._ready:
-            Logger.warning("InvoiceExtractor: AI not configured — open Menu > AI Settings")
-
-    def reload(self):
-        """Call this after the user saves new AI settings."""
-        self._check_ready()
-
-    @property
-    def client(self):
-        """Legacy property — truthy when extractor is ready."""
-        return self._ready or None
-
-    def encode_image(self, image_path):
-        try:
-            with open(image_path, "rb") as f:
-                return base64.b64encode(f.read()).decode("utf-8")
-        except Exception as e:
-            Logger.error(f"InvoiceExtractor: encode_image failed: {e}")
-            return None
-
     def analyze_with_ai(self, image_path):
-        """Send image to AI via raw HTTP and return parsed dict."""
-        import requests as _requests
-
-        if not self._ready:
+        """Send image to AI and return parsed dict."""
+        if not self.client:
+            return {}
+        if not BASE64_AVAILABLE:
+            Logger.error("InvoiceExtractor: base64 not available")
             return {}
 
-        b64 = self.encode_image(image_path)
-        if not b64:
+        base64_image = self.encode_image(image_path)
+        if not base64_image:
             return {}
 
         cfg = AIConfig.get()
 
         try:
-            if cfg.provider == "Anthropic Claude":
-                response_text = self._call_anthropic(b64, cfg, _requests)
+            if getattr(self, "_mode", "openai") == "anthropic":
+                response_text = self._call_anthropic(base64_image, cfg)
             else:
-                response_text = self._call_openai_compat(b64, cfg, _requests)
+                response_text = self._call_openai_compat(base64_image, cfg)
 
+            # Parse JSON from response
             json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
             raw = json_match.group(0) if json_match else response_text
             result = json.loads(raw)
@@ -245,11 +263,65 @@ class InvoiceExtractor:
             return {}
         except Exception as e:
             Logger.error(f"InvoiceExtractor: API call failed: {e}")
-            raise
+            raise   # re-raise so caller can show a useful error message
 
-    def _call_openai_compat(self, b64, cfg, requests):
-        """Call any OpenAI-compatible endpoint (OpenAI, local, etc.)."""
-        url = cfg.base_url.rstrip("/") + "/chat/completions"
+    # ── static HTTP helpers (also used by the Test Connection button) ──
+
+    @staticmethod
+    def openai_compat_request(base_url, api_key, payload, timeout=60):
+        """POST to an OpenAI-compatible /chat/completions endpoint.
+        Returns the assistant message text. Raises RuntimeError on failure."""
+        url = base_url.rstrip('/') + '/chat/completions'
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"HTTP {resp.status_code}: {InvoiceExtractor._extract_api_error(resp)}")
+        data = resp.json()
+        try:
+            return data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError(f"Unexpected API response: {str(data)[:200]}")
+
+    @staticmethod
+    def anthropic_request(api_key, payload, timeout=60):
+        """POST to the Anthropic Messages API.
+        Returns the text of the first content block. Raises RuntimeError on failure."""
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"HTTP {resp.status_code}: {InvoiceExtractor._extract_api_error(resp)}")
+        data = resp.json()
+        try:
+            # First text block (skip any non-text blocks defensively)
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    return block["text"].strip()
+            raise KeyError("no text block")
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError(f"Unexpected API response: {str(data)[:200]}")
+
+    @staticmethod
+    def _extract_api_error(resp):
+        """Pull a human-readable error message out of an API error response."""
+        try:
+            err = resp.json().get("error", {})
+            if isinstance(err, dict):
+                return err.get("message", resp.text[:200])
+            return str(err)[:200]
+        except Exception:
+            return resp.text[:200]
+
+    def _call_openai_compat(self, base64_image, cfg):
         payload = {
             "model": cfg.model,
             "max_tokens": 500,
@@ -259,21 +331,14 @@ class InvoiceExtractor:
                 "content": [
                     {"type": "text", "text": self._PROMPT},
                     {"type": "image_url",
-                     "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                     "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
                 ],
             }],
         }
-        headers = {
-            "Authorization": f"Bearer {cfg.api_key}",
-            "Content-Type": "application/json",
-        }
-        r = requests.post(url, json=payload, headers=headers, timeout=60)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        return self.openai_compat_request(
+            cfg.base_url, cfg.api_key, payload, timeout=self.REQUEST_TIMEOUT)
 
-    def _call_anthropic(self, b64, cfg, requests):
-        """Call Anthropic Messages API directly."""
-        url = "https://api.anthropic.com/v1/messages"
+    def _call_anthropic(self, base64_image, cfg):
         payload = {
             "model": cfg.model,
             "max_tokens": 500,
@@ -283,23 +348,17 @@ class InvoiceExtractor:
                     {"type": "image",
                      "source": {"type": "base64",
                                 "media_type": "image/jpeg",
-                                "data": b64}},
+                                "data": base64_image}},
                     {"type": "text", "text": self._PROMPT},
                 ],
             }],
         }
-        headers = {
-            "x-api-key": cfg.api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
-        r = requests.post(url, json=payload, headers=headers, timeout=60)
-        r.raise_for_status()
-        return r.json()["content"][0]["text"].strip()
+        return self.anthropic_request(
+            cfg.api_key, payload, timeout=self.REQUEST_TIMEOUT)
 
     def extract_invoice_data(self, image_path):
         """Public entry point."""
-        if not self._ready:
+        if not self.client:
             Logger.warning("InvoiceExtractor: client not ready — check AI Settings")
             return {}
         return self.analyze_with_ai(image_path)
@@ -666,8 +725,6 @@ class CameraScreen(MDScreen):
             test_label.theme_text_color = "Secondary"
 
             def do_test(dt):
-                import requests as _requests
-
                 key = api_key_field.text.strip()
                 model = model_field.text.strip()
                 url = base_url_field.text.strip()
@@ -679,28 +736,22 @@ class CameraScreen(MDScreen):
                     return
 
                 try:
+                    if not REQUESTS_AVAILABLE:
+                        raise RuntimeError("requests package not installed")
                     if provider == "Anthropic Claude":
-                        r = _requests.post(
-                            "https://api.anthropic.com/v1/messages",
-                            json={"model": model, "max_tokens": 10,
-                                  "messages": [{"role": "user", "content": "Hi"}]},
-                            headers={"x-api-key": key,
-                                     "anthropic-version": "2023-06-01",
-                                     "Content-Type": "application/json"},
-                            timeout=15,
+                        InvoiceExtractor.anthropic_request(
+                            key,
+                            {"model": model, "max_tokens": 10,
+                             "messages": [{"role": "user", "content": "Hi"}]},
+                            timeout=30,
                         )
-                        r.raise_for_status()
                     else:
-                        r = _requests.post(
-                            url.rstrip("/") + "/chat/completions",
-                            json={"model": model, "max_tokens": 5,
-                                  "messages": [{"role": "user", "content": "Hi"}]},
-                            headers={"Authorization": f"Bearer {key}",
-                                     "Content-Type": "application/json"},
-                            timeout=15,
+                        InvoiceExtractor.openai_compat_request(
+                            url, key,
+                            {"model": model, "max_tokens": 5,
+                             "messages": [{"role": "user", "content": "Hi"}]},
+                            timeout=30,
                         )
-                        r.raise_for_status()
-
                     test_label.text = "✓  Connection successful!"
                     test_label.theme_text_color = "Custom"
                     test_label.text_color = (0.0, 0.6, 0.2, 1)
@@ -2349,9 +2400,10 @@ class ReceiptReaderApp(MDApp):
     def export_invoices_to_excel(self, invoices, filepath):
         """Export invoices to Excel file"""
         try:
+            import openpyxl
             from openpyxl import Workbook
         except ImportError:
-            raise ImportError("openpyxl is not available on this device. Use CSV export instead.")
+            raise ImportError("openpyxl is required for Excel export. Install with: pip install openpyxl")
         
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
@@ -2404,7 +2456,7 @@ class ReceiptReaderApp(MDApp):
             from reportlab.lib import colors
             from reportlab.platypus.flowables import HRFlowable
         except ImportError:
-            raise ImportError("PDF export is not available on this device. Use CSV export instead.")
+            raise ImportError("reportlab is required for PDF export. Install with: pip install reportlab")
         
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
