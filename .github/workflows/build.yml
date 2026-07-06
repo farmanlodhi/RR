@@ -44,27 +44,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          # No restore-keys fallback: a changed spec must start from a
-          # clean cache, or stale SDK/p4a state from failed runs leaks in.
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          # Key includes the workflow file too, so any change to either
+          # automatically starts from a clean cache (failed runs still
+          # save their cache, which can otherwise poison the next run).
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec', '.github/workflows/build.yml') }}
 
-      # ── THE FIX: pre-accept all Android SDK licences by writing the
-      #    licence hash files that sdkmanager checks for. This bypasses
-      #    the interactive prompt entirely. ───────────────────────────
-      - name: Accept Android SDK licences
-        run: |
-          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
-          # android-sdk-license  (covers platform-tools, build-tools, platforms)
-          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\n d56f5187479451eabf01fb78af6dfcb131a6481e\n 24333f8a63b6825ea9c5514f83c2829b004d1fee' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
-          # android-sdk-preview-license
-          printf '\n84831b9409646a918e30573bab4c9c91346d8abd' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
-          # intel-android-extra-license
-          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
-            > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
-          echo "Licence files written:"
-          ls -la ~/.buildozer/android/platform/android-sdk/licenses/
+      # NOTE: no manual licence step. Pre-creating the android-sdk folder
+      # makes buildozer 1.5.0 think the SDK is already installed and skip
+      # downloading it (leaving sdkmanager missing). Licences are accepted
+      # via `android.accept_sdk_license = True` in buildozer.spec instead.
 
       - name: Build APK
         run: |
