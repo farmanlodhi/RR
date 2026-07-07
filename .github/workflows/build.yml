@@ -1,22 +1,17 @@
 name: Build Android APK
-
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
@@ -27,11 +22,11 @@ jobs:
             libssl-dev libffi-dev \
             libsqlite3-dev \
             autoconf automake libtool pkg-config \
+            gettext autopoint \
             zlib1g-dev libncurses5-dev libncursesw5-dev \
             cmake lld ccache \
             openjdk-17-jdk \
             libltdl-dev libgdbm-dev liblzma-dev libreadline-dev
-
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip wheel setuptools
@@ -39,7 +34,6 @@ jobs:
           # pinned in buildozer.spec. Buildozer 1.6+ targets the new
           # wheel-based p4a (2026.x) which cannot build pyjnius/pillow.
           pip install buildozer==1.5.0 "cython<3"
-
       - name: Cache Buildozer directory
         uses: actions/cache@v4
         with:
@@ -48,19 +42,33 @@ jobs:
           # automatically starts from a clean cache (failed runs still
           # save their cache, which can otherwise poison the next run).
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec', '.github/workflows/build.yml') }}
-
       # NOTE: no manual licence step. Pre-creating the android-sdk folder
       # makes buildozer 1.5.0 think the SDK is already installed and skip
       # downloading it (leaving sdkmanager missing). Licences are accepted
       # via `android.accept_sdk_license = True` in buildozer.spec instead.
-
+      # ── Pre-seed the liblzma source tarball ─────────────────────────
+      # The p4a liblzma recipe downloads xz-5.2.4.tar.gz from tukaani.org,
+      # which no longer serves it (release downloads moved to GitHub after
+      # the 2024 xz incident) — the download times out and kills the build.
+      # p4a skips the download when the file + its .mark marker already
+      # exist in <storage-dir>/packages/liblzma/, so we fetch the identical
+      # source from GitHub's tag archive (extracts to xz-5.2.4/ too; the
+      # recipe declares no checksum, and it runs autogen.sh itself since
+      # the tag archive ships no pre-generated configure script).
+      - name: Pre-seed liblzma source (tukaani.org unreachable)
+        run: |
+          PKG_DIR=".buildozer/android/platform/build-arm64-v8a/packages/liblzma"
+          mkdir -p "$PKG_DIR"
+          curl -L --fail --retry 3 -o "$PKG_DIR/xz-5.2.4.tar.gz" \
+            https://github.com/tukaani-project/xz/archive/refs/tags/v5.2.4.tar.gz
+          touch "$PKG_DIR/.mark-xz-5.2.4.tar.gz"
+          ls -la "$PKG_DIR"
       - name: Build APK
         run: |
           # pipefail: without it, `tee` masks buildozer's exit code and
           # failed builds show green with no APK
           set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
-
       - name: Show failure context
         if: failure()
         run: |
@@ -72,7 +80,6 @@ jobs:
           echo ""
           echo "=========== Last 120 lines of build log ==========="
           tail -120 build.log
-
       - name: Find APK
         if: always()
         run: |
@@ -84,7 +91,6 @@ jobs:
           echo ""
           echo "=== Last 50 lines of build log ==="
           tail -50 build.log || true
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         if: always()
@@ -92,7 +98,6 @@ jobs:
           name: receipt-reader-apk
           path: bin/*.apk
           if-no-files-found: warn
-
       - name: Upload build log
         uses: actions/upload-artifact@v4
         if: always()
