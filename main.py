@@ -35,6 +35,18 @@ except ImportError:
     CAMERA_AVAILABLE = False
     Logger.warning("Plyer not available - camera functionality disabled")
 
+# Detect Android properly — platform.system() returns 'Linux' on Android!
+from kivy.utils import platform as kivy_platform
+IS_ANDROID = (kivy_platform == 'android')
+
+try:
+    from camera4kivy import Preview
+    CAMERA4KIVY_AVAILABLE = True
+except ImportError:
+    Preview = None
+    CAMERA4KIVY_AVAILABLE = False
+    Logger.warning("camera4kivy not available - live camera disabled")
+
 try:
     import requests
     REQUESTS_AVAILABLE = True
@@ -410,6 +422,97 @@ class InvoiceExtractor:
             Logger.warning("InvoiceExtractor: client not ready — check AI Settings")
             return {}
         return self.analyze_with_ai(image_path)
+
+
+class PhotoScreen(MDScreen):
+    """Full-screen live camera preview with a capture button (camera4kivy/CameraX)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.name = "photo"
+        self.preview = None
+
+        from kivy.metrics import dp
+
+        layout = MDBoxLayout(orientation='vertical')
+
+        top_bar = MDTopAppBar(
+            title="Scan Receipt",
+            elevation=4,
+            md_bg_color=(0.0, 0.588, 0.533, 1),
+        )
+        top_bar.left_action_items = [["arrow-left", lambda x: self.cancel(x)]]
+        layout.add_widget(top_bar)
+
+        if CAMERA4KIVY_AVAILABLE:
+            self.preview = Preview(aspect_ratio='4:3')
+            layout.add_widget(self.preview)
+        else:
+            layout.add_widget(MDLabel(
+                text="Live camera not available on this device.",
+                halign="center",
+            ))
+
+        btn_row = MDBoxLayout(orientation='horizontal', spacing=dp(10),
+                              padding=dp(12), size_hint_y=None, height=dp(76))
+        capture_btn = MDRaisedButton(
+            text="📷   Capture",
+            font_size="17sp",
+            size_hint=(1, None),
+            height=dp(52),
+            md_bg_color=(1.0, 0.6, 0.0, 1),
+        )
+        capture_btn.bind(on_press=self.capture)
+        btn_row.add_widget(capture_btn)
+        layout.add_widget(btn_row)
+
+        self.add_widget(layout)
+
+    def on_enter(self):
+        """Start the camera when the screen becomes visible."""
+        if self.preview:
+            try:
+                self.preview.connect_camera(
+                    camera_id='back',
+                    enable_analyze_pixels=False,
+                    filepath_callback=self.photo_saved,
+                )
+            except Exception as e:
+                Logger.error(f"PhotoScreen: connect_camera failed: {e}")
+
+    def on_pre_leave(self):
+        """Always release the camera when leaving the screen."""
+        if self.preview:
+            try:
+                self.preview.disconnect_camera()
+            except Exception as e:
+                Logger.warning(f"PhotoScreen: disconnect_camera failed: {e}")
+
+    def capture(self, instance):
+        if not self.preview:
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            # 'private' = app-private storage; path is delivered to photo_saved()
+            self.preview.capture_photo(
+                location='private',
+                subdir='images',
+                name=f"invoice_{timestamp}",
+            )
+        except Exception as e:
+            Logger.error(f"PhotoScreen: capture failed: {e}")
+
+    def photo_saved(self, filepath):
+        """Called by camera4kivy (possibly off the UI thread) once the photo is on disk."""
+        def deliver(dt):
+            app = MDApp.get_running_app()
+            app.root.current = "camera"
+            camera_screen = app.root.get_screen("camera")
+            camera_screen.on_camera_complete(filepath)
+        Clock.schedule_once(deliver, 0)
+
+    def cancel(self, instance):
+        MDApp.get_running_app().root.current = "camera"
 
 
 class CameraScreen(MDScreen):
@@ -894,24 +997,44 @@ class CameraScreen(MDScreen):
         dialog.open()
     
     def take_photo(self, instance):
-        """Take a photo using the device camera or file picker"""
-        # On desktop/Windows, use file picker as fallback
-        is_desktop = platform.system() in ['Windows', 'Linux', 'Darwin']
-        
-        if CAMERA_AVAILABLE and not is_desktop:
-            # Try camera on mobile devices
-            try:
-                camera.take_picture(
-                    filename=self.get_image_path(),
-                    on_complete=self.on_camera_complete
-                )
-                return
-            except Exception as e:
-                Logger.error(f"Camera error: {e}")
-                # Fall through to file picker
-        
-        # Use file picker for desktop or if camera fails
+        """Open the live camera on Android; fall back to the file picker elsewhere.
+
+        NOTE: platform.system() returns 'Linux' on Android, so we must use
+        kivy's platform detection (IS_ANDROID) instead."""
+        if IS_ANDROID and CAMERA4KIVY_AVAILABLE:
+            self.open_camera_with_permission()
+            return
+        # Desktop, or live camera unavailable: pick an image file instead
         self.show_file_picker()
+
+    def open_camera_with_permission(self):
+        """Request the CAMERA runtime permission (Android 6+) then open the preview."""
+        app = MDApp.get_running_app()
+        try:
+            from android.permissions import (
+                request_permissions, check_permission, Permission)
+
+            if check_permission(Permission.CAMERA):
+                app.root.current = "photo"
+                return
+
+            def on_result(permissions, grants):
+                def apply(dt):
+                    if grants and all(grants):
+                        app.root.current = "photo"
+                    else:
+                        self.show_error(
+                            "Camera permission was denied. You can enable it in "
+                            "Settings → Apps → Receipt Reader → Permissions, "
+                            "or pick a receipt image from your gallery instead.")
+                        self.show_file_picker()
+                Clock.schedule_once(apply, 0)
+
+            request_permissions([Permission.CAMERA], on_result)
+        except Exception as e:
+            Logger.error(f"Permission handling failed: {e}")
+            # Best effort: try opening the camera anyway
+            app.root.current = "photo"
     
     def get_image_path(self):
         """Get path for saving captured image"""
@@ -2216,6 +2339,7 @@ class ReceiptReaderApp(MDApp):
         sm.add_widget(CameraScreen())
         sm.add_widget(ViewScreen())
         sm.add_widget(SaveScreen())
+        sm.add_widget(PhotoScreen())
         sm.current = "camera"  # Set initial screen
         return sm
     
