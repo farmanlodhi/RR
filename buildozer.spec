@@ -5,6 +5,7 @@ package.domain = org.gsi
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
 version = 1.0.0
+p4a.local_recipes = ./p4a-recipes
 # NOTE: openai/anthropic SDKs removed (pydantic-core/Rust won't build for
 # Android) — AI calls use plain requests. pillow removed too: PyPI ships no
 # Android wheels for it and the app now reads image sizes in pure Python.
