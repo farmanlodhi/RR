@@ -63,6 +63,11 @@ jobs:
             https://github.com/tukaani-project/xz/archive/refs/tags/v5.2.4.tar.gz
           touch "$PKG_DIR/.mark-xz-5.2.4.tar.gz"
           ls -la "$PKG_DIR"
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
       - name: Build APK
         run: |
           # pipefail: without it, `tee` masks buildozer's exit code and
