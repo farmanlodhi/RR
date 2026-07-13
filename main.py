@@ -599,6 +599,15 @@ class CameraScreen(MDScreen):
         self.camera_btn.bind(on_press=self.take_photo)
         layout.add_widget(self.camera_btn)
         
+        # ── Gallery button (always available fallback) ────────────────
+        self.gallery_btn = MDFlatButton(
+            text="…or pick an image from files",
+            pos_hint={'center_x': 0.5},
+            font_size="13sp",
+        )
+        self.gallery_btn.bind(on_press=lambda inst: self.show_file_picker())
+        layout.add_widget(self.gallery_btn)
+        
         # ── Image preview ─────────────────────────────────────────────
         self.image_preview = Image(
             size_hint_y=None,
@@ -1001,27 +1010,44 @@ class CameraScreen(MDScreen):
 
         NOTE: platform.system() returns 'Linux' on Android, so we must use
         kivy's platform detection (IS_ANDROID) instead."""
-        if IS_ANDROID and CAMERA4KIVY_AVAILABLE:
+        if IS_ANDROID:
+            # Always run the permission flow first; whether the live camera
+            # is actually available is decided after permission is granted.
             self.open_camera_with_permission()
             return
-        # Desktop, or live camera unavailable: pick an image file instead
+        # Desktop: pick an image file instead
         self.show_file_picker()
+
+    def launch_camera(self):
+        """Open the live preview if camera4kivy is bundled; otherwise explain
+        why and fall back to the file picker (never fail silently)."""
+        app = MDApp.get_running_app()
+        if CAMERA4KIVY_AVAILABLE:
+            app.root.current = "photo"
+        else:
+            self.show_error(
+                "The live camera module (camera4kivy) is not included in this "
+                "build of the app, so the camera cannot be opened.\n\n"
+                "To fix: add 'camera4kivy, gestures4kivy' to requirements in "
+                "buildozer.spec and add the camerax_provider p4a hook, then "
+                "rebuild the APK.\n\n"
+                "For now you can pick a receipt photo from your files instead.")
+            self.show_file_picker()
 
     def open_camera_with_permission(self):
         """Request the CAMERA runtime permission (Android 6+) then open the preview."""
-        app = MDApp.get_running_app()
         try:
             from android.permissions import (
                 request_permissions, check_permission, Permission)
 
             if check_permission(Permission.CAMERA):
-                app.root.current = "photo"
+                self.launch_camera()
                 return
 
             def on_result(permissions, grants):
                 def apply(dt):
                     if grants and all(grants):
-                        app.root.current = "photo"
+                        self.launch_camera()
                     else:
                         self.show_error(
                             "Camera permission was denied. You can enable it in "
@@ -1034,7 +1060,7 @@ class CameraScreen(MDScreen):
         except Exception as e:
             Logger.error(f"Permission handling failed: {e}")
             # Best effort: try opening the camera anyway
-            app.root.current = "photo"
+            self.launch_camera()
     
     def get_image_path(self):
         """Get path for saving captured image"""
@@ -1635,7 +1661,19 @@ class CameraScreen(MDScreen):
         
         # Create file chooser
         filechooser = FileChooserIconView()
-        filechooser.path = os.path.expanduser("~")
+        # Pick a sensible starting folder: shared storage on Android
+        # (os.path.expanduser("~") points at an inaccessible dir there)
+        start_path = os.path.expanduser("~")
+        if IS_ANDROID:
+            try:
+                from android.storage import primary_external_storage_path
+                start_path = primary_external_storage_path()
+            except Exception as e:
+                Logger.warning(f"primary_external_storage_path failed: {e}")
+                start_path = "/storage/emulated/0"
+            if not os.path.isdir(start_path):
+                start_path = os.path.expanduser("~")
+        filechooser.path = start_path
         filechooser.filters = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.gif']
         
         content = MDBoxLayout(orientation='vertical', spacing=10, padding=10)
