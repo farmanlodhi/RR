@@ -68,6 +68,10 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Fetch camerax_provider
+        run: |
+          git clone --depth 1 https://github.com/Android-for-Python/camerax_provider.git
+          rm -rf camerax_provider/.git
       - name: Build APK
         run: |
           # pipefail: without it, `tee` masks buildozer's exit code and
