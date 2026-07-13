@@ -18,7 +18,7 @@ p4a.local_recipes = ./p4a-recipes
 # target ("fatal error: 'lzma.h' file not found"); the p4a recipe provides it.
 # IMPORTANT: keep this on ONE line — buildozer does not support backslash
 # line continuations and passes them literally into package names.
-requirements = python3,liblzma,kivy==2.3.0,kivymd==1.2.0,plyer,requests,certifi,charset-normalizer,idna,urllib3,reportlab,openpyxl
+requirements = python3,liblzma,kivy==2.3.0,kivymd==1.2.0,plyer,requests,certifi,charset-normalizer,idna,urllib3,reportlab,openpyxl,camera4kivy, gestures4kivy
 
 android.permissions = CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,INTERNET,ACCESS_NETWORK_STATE
 
@@ -59,7 +59,7 @@ android.enable_androidx = True
 # using its own recipes and is the proven combo with NDK 25b + Kivy 2.3.0.
 p4a.branch = master
 p4a.commit = 957a3e5f8c270f7aa648ba185e5a68c1077a798d
-
+p4a.hook = camerax_provider/gradle_options.py
 orientation = portrait
 
 #presplash.filename = %(source.dir)s/presplash.png
