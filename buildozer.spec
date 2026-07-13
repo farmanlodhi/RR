@@ -26,7 +26,7 @@ android.permissions = CAMERA,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,INTERN
 # Declare camera hardware features. required="false" is implied by
 # buildozer's uses-feature output, so the app still installs on devices
 # without a camera (file-picker fallback covers those).
-android.features = android.hardware.camera,android.hardware.camera.autofocus
+# android.features = android.hardware.camera,android.hardware.camera.autofocus
 # Android 11+ package visibility: plyer's camera calls resolveActivity()
 # on ACTION_IMAGE_CAPTURE, which returns null unless the intent is
 # declared in a <queries> block. Without this, the camera button does
