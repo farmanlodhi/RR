@@ -26,6 +26,7 @@ import re
 import shutil
 from datetime import datetime
 import platform
+from kivy.utils import platform as kivy_platform
 
 # Try to import camera and AI modules
 try:
@@ -35,24 +36,12 @@ except ImportError:
     CAMERA_AVAILABLE = False
     Logger.warning("Plyer not available - camera functionality disabled")
 
-# Detect Android properly — platform.system() returns 'Linux' on Android!
-from kivy.utils import platform as kivy_platform
-IS_ANDROID = (kivy_platform == 'android')
-
 try:
-    from camera4kivy import Preview
-    CAMERA4KIVY_AVAILABLE = True
+    import openai
+    OPENAI_AVAILABLE = True
 except ImportError:
-    Preview = None
-    CAMERA4KIVY_AVAILABLE = False
-    Logger.warning("camera4kivy not available - live camera disabled")
-
-try:
-    import requests
-    REQUESTS_AVAILABLE = True
-except ImportError:
-    REQUESTS_AVAILABLE = False
-    Logger.warning("requests not available - AI features disabled")
+    OPENAI_AVAILABLE = False
+    Logger.warning("OpenAI not available - install with: pip install openai")
 
 try:
     import base64
@@ -66,55 +55,7 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-    Logger.warning("PIL not available - using built-in header parser for image sizes")
-
-
-def get_image_dimensions(image_path):
-    """Return (width, height) of a JPEG or PNG without needing Pillow.
-    Uses PIL when available; otherwise parses the file header directly.
-    Returns None if dimensions cannot be determined."""
-    if PIL_AVAILABLE:
-        try:
-            with PILImage.open(image_path) as img:
-                return img.size
-        except Exception:
-            pass
-    try:
-        with open(image_path, 'rb') as f:
-            head = f.read(26)
-            # PNG: dimensions live in the IHDR chunk at fixed offsets
-            if head.startswith(b'\x89PNG\r\n\x1a\n'):
-                import struct
-                w, h = struct.unpack('>II', head[16:24])
-                return (w, h)
-            # JPEG: walk the segment markers until a Start-Of-Frame segment
-            if head.startswith(b'\xff\xd8'):
-                import struct
-                f.seek(2)
-                while True:
-                    marker = f.read(2)
-                    if len(marker) < 2 or marker[0] != 0xFF:
-                        return None
-                    # skip padding bytes
-                    while marker[1] == 0xFF:
-                        nxt = f.read(1)
-                        if not nxt:
-                            return None
-                        marker = b'\xff' + nxt
-                    code = marker[1]
-                    # SOF0-SOF15 (excluding DHT/JPG/DAC markers c4, c8, cc)
-                    if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
-                        f.read(3)  # length (2) + precision (1)
-                        h, w = struct.unpack('>HH', f.read(4))
-                        return (w, h)
-                    length_bytes = f.read(2)
-                    if len(length_bytes) < 2:
-                        return None
-                    seg_len = struct.unpack('>H', length_bytes)[0]
-                    f.seek(seg_len - 2, 1)
-    except Exception as e:
-        Logger.warning(f"get_image_dimensions failed for {image_path}: {e}")
-    return None
+    Logger.warning("PIL not available - image processing disabled")
 
 
 class AIConfig:
@@ -225,19 +166,16 @@ class InvoiceExtractor:
     """
     Extract receipt/invoice data using an AI Vision model.
     Uses whatever provider the user has configured in AIConfig.
-    All providers are called with plain HTTP POST via `requests` —
-    no openai/anthropic SDKs needed (they don't compile for Android).
+    Anthropic Claude is called via its own SDK; all others are called
+    through the openai-compatible client.
     """
 
-    REQUEST_TIMEOUT = 60  # seconds
-
     def __init__(self):
-        self.client = None   # kept as a truthy "ready" flag for existing callers
-        self._mode = "openai"
+        self.client = None
         self._build_client()
 
     def _build_client(self):
-        """(Re)validate configuration from current AIConfig."""
+        """(Re)initialise the API client from current AIConfig."""
         cfg = AIConfig.get()
         self.client = None
 
@@ -245,13 +183,34 @@ class InvoiceExtractor:
             Logger.warning("InvoiceExtractor: AI not configured — open Menu > AI Settings")
             return
 
-        if not REQUESTS_AVAILABLE:
-            Logger.error("InvoiceExtractor: requests package not installed")
-            return
+        if cfg.provider == "Anthropic Claude":
+            # Use Anthropic SDK if available; fall back to openai-compat endpoint
+            try:
+                import anthropic
+                self.client = anthropic.Anthropic(api_key=cfg.api_key)
+                self._mode = "anthropic"
+                Logger.info("InvoiceExtractor: Anthropic client ready")
+            except ImportError:
+                Logger.warning("InvoiceExtractor: anthropic SDK not installed; "
+                               "falling back to openai-compat endpoint")
+                self._init_openai_compat(cfg)
+        else:
+            self._init_openai_compat(cfg)
 
-        self._mode = "anthropic" if cfg.provider == "Anthropic Claude" else "openai"
-        self.client = True   # ready
-        Logger.info(f"InvoiceExtractor: ready (mode={self._mode}, base_url={cfg.base_url})")
+    def _init_openai_compat(self, cfg):
+        if not OPENAI_AVAILABLE:
+            Logger.error("InvoiceExtractor: openai package not installed")
+            return
+        try:
+            self.client = openai.OpenAI(
+                api_key=cfg.api_key,
+                base_url=cfg.base_url,
+            )
+            self._mode = "openai"
+            Logger.info(f"InvoiceExtractor: OpenAI-compat client ready ({cfg.base_url})")
+        except Exception as e:
+            Logger.error(f"InvoiceExtractor: client init failed: {e}")
+            self.client = None
 
     def reload(self):
         """Call this after the user saves new AI settings."""
@@ -325,68 +284,10 @@ class InvoiceExtractor:
             Logger.error(f"InvoiceExtractor: API call failed: {e}")
             raise   # re-raise so caller can show a useful error message
 
-    # ── static HTTP helpers (also used by the Test Connection button) ──
-
-    @staticmethod
-    def openai_compat_request(base_url, api_key, payload, timeout=60):
-        """POST to an OpenAI-compatible /chat/completions endpoint.
-        Returns the assistant message text. Raises RuntimeError on failure."""
-        url = base_url.rstrip('/') + '/chat/completions'
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"HTTP {resp.status_code}: {InvoiceExtractor._extract_api_error(resp)}")
-        data = resp.json()
-        try:
-            return data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, TypeError):
-            raise RuntimeError(f"Unexpected API response: {str(data)[:200]}")
-
-    @staticmethod
-    def anthropic_request(api_key, payload, timeout=60):
-        """POST to the Anthropic Messages API.
-        Returns the text of the first content block. Raises RuntimeError on failure."""
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"HTTP {resp.status_code}: {InvoiceExtractor._extract_api_error(resp)}")
-        data = resp.json()
-        try:
-            # First text block (skip any non-text blocks defensively)
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    return block["text"].strip()
-            raise KeyError("no text block")
-        except (KeyError, IndexError, TypeError):
-            raise RuntimeError(f"Unexpected API response: {str(data)[:200]}")
-
-    @staticmethod
-    def _extract_api_error(resp):
-        """Pull a human-readable error message out of an API error response."""
-        try:
-            err = resp.json().get("error", {})
-            if isinstance(err, dict):
-                return err.get("message", resp.text[:200])
-            return str(err)[:200]
-        except Exception:
-            return resp.text[:200]
-
     def _call_openai_compat(self, base64_image, cfg):
-        payload = {
-            "model": cfg.model,
-            "max_tokens": 500,
-            "temperature": 0.1,
-            "messages": [{
+        response = self.client.chat.completions.create(
+            model=cfg.model,
+            messages=[{
                 "role": "user",
                 "content": [
                     {"type": "text", "text": self._PROMPT},
@@ -394,15 +295,16 @@ class InvoiceExtractor:
                      "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
                 ],
             }],
-        }
-        return self.openai_compat_request(
-            cfg.base_url, cfg.api_key, payload, timeout=self.REQUEST_TIMEOUT)
+            max_tokens=500,
+            temperature=0.1,
+        )
+        return response.choices[0].message.content.strip()
 
     def _call_anthropic(self, base64_image, cfg):
-        payload = {
-            "model": cfg.model,
-            "max_tokens": 500,
-            "messages": [{
+        response = self.client.messages.create(
+            model=cfg.model,
+            max_tokens=500,
+            messages=[{
                 "role": "user",
                 "content": [
                     {"type": "image",
@@ -412,9 +314,8 @@ class InvoiceExtractor:
                     {"type": "text", "text": self._PROMPT},
                 ],
             }],
-        }
-        return self.anthropic_request(
-            cfg.api_key, payload, timeout=self.REQUEST_TIMEOUT)
+        )
+        return response.content[0].text.strip()
 
     def extract_invoice_data(self, image_path):
         """Public entry point."""
@@ -424,95 +325,192 @@ class InvoiceExtractor:
         return self.analyze_with_ai(image_path)
 
 
-class PhotoScreen(MDScreen):
-    """Full-screen live camera preview with a capture button (camera4kivy/CameraX)."""
+class OCRExtractor:
+    """
+    Free, on-device receipt reading — no API key, no internet needed.
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.name = "photo"
-        self.preview = None
+    * On Android it uses Google ML Kit Text Recognition (model is
+      bundled in the APK) through pyjnius.
+    * On desktop it falls back to pytesseract if installed, which is
+      handy for testing.
 
-        from kivy.metrics import dp
+    OCR returns raw text only, so the receipt fields are then guessed
+    with simple rules (keywords + patterns).  Less accurate than the
+    AI reader — results always open in the edit dialog for review.
+    """
 
-        layout = MDBoxLayout(orientation='vertical')
+    FIELDS = ['invoice_number', 'vendor', 'invoicee_name', 'date',
+              'amount', 'tax', 'total', 'description']
 
-        top_bar = MDTopAppBar(
-            title="Scan Receipt",
-            elevation=4,
-            md_bg_color=(0.0, 0.588, 0.533, 1),
-        )
-        top_bar.left_action_items = [["arrow-left", lambda x: self.cancel(x)]]
-        layout.add_widget(top_bar)
+    def __init__(self):
+        self._java_refs = []   # keep Java listener objects alive during the call
 
-        if CAMERA4KIVY_AVAILABLE:
-            self.preview = Preview(aspect_ratio='4:3')
-            layout.add_widget(self.preview)
+    # ── public entry point ────────────────────────────────────────
+    def extract(self, image_path, callback):
+        """
+        Run OCR on image_path.  callback(result_dict_or_None, error_or_None)
+        is always invoked on the Kivy main thread.
+        """
+        def done(text, error):
+            if error:
+                Clock.schedule_once(lambda dt: callback(None, error), 0)
+            else:
+                parsed = self.parse_receipt_text(text or "")
+                Clock.schedule_once(lambda dt: callback(parsed, None), 0)
+
+        if kivy_platform == 'android':
+            try:
+                self._ocr_android(image_path, done)
+            except Exception as e:
+                Logger.error(f"OCRExtractor: ML Kit failed to start: {e}")
+                done(None, f"On-device OCR unavailable: {e}")
         else:
-            layout.add_widget(MDLabel(
-                text="Live camera not available on this device.",
-                halign="center",
-            ))
+            self._ocr_desktop(image_path, done)
 
-        btn_row = MDBoxLayout(orientation='horizontal', spacing=dp(10),
-                              padding=dp(12), size_hint_y=None, height=dp(76))
-        capture_btn = MDRaisedButton(
-            text="📷   Capture",
-            font_size="17sp",
-            size_hint=(1, None),
-            height=dp(52),
-            md_bg_color=(1.0, 0.6, 0.0, 1),
-        )
-        capture_btn.bind(on_press=self.capture)
-        btn_row.add_widget(capture_btn)
-        layout.add_widget(btn_row)
+    # ── Android: Google ML Kit via pyjnius ────────────────────────
+    def _ocr_android(self, image_path, done):
+        from jnius import autoclass, PythonJavaClass, java_method
+        from android import mActivity
 
-        self.add_widget(layout)
+        InputImage = autoclass('com.google.mlkit.vision.common.InputImage')
+        TextRecognition = autoclass('com.google.mlkit.vision.text.TextRecognition')
+        Options = autoclass('com.google.mlkit.vision.text.latin.TextRecognizerOptions')
+        Uri = autoclass('android.net.Uri')
+        JFile = autoclass('java.io.File')
 
-    def on_enter(self):
-        """Start the camera when the screen becomes visible."""
-        if self.preview:
-            try:
-                self.preview.connect_camera(
-                    camera_id='back',
-                    enable_analyze_pixels=False,
-                    filepath_callback=self.photo_saved,
-                )
-            except Exception as e:
-                Logger.error(f"PhotoScreen: connect_camera failed: {e}")
+        context = mActivity.getApplicationContext()
+        image = InputImage.fromFilePath(context, Uri.fromFile(JFile(image_path)))
+        recognizer = TextRecognition.getClient(Options.DEFAULT_OPTIONS)
 
-    def on_pre_leave(self):
-        """Always release the camera when leaving the screen."""
-        if self.preview:
-            try:
-                self.preview.disconnect_camera()
-            except Exception as e:
-                Logger.warning(f"PhotoScreen: disconnect_camera failed: {e}")
+        ocr = self
 
-    def capture(self, instance):
-        if not self.preview:
-            return
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        class _Success(PythonJavaClass):
+            __javainterfaces__ = ['com/google/android/gms/tasks/OnSuccessListener']
+            __javacontext__ = 'app'
+
+            @java_method('(Ljava/lang/Object;)V')
+            def onSuccess(self, visionText):
+                try:
+                    done(visionText.getText(), None)
+                finally:
+                    ocr._java_refs.clear()
+
+        class _Failure(PythonJavaClass):
+            __javainterfaces__ = ['com/google/android/gms/tasks/OnFailureListener']
+            __javacontext__ = 'app'
+
+            @java_method('(Ljava/lang/Exception;)V')
+            def onFailure(self, e):
+                try:
+                    done(None, e.getMessage())
+                finally:
+                    ocr._java_refs.clear()
+
+        success, failure = _Success(), _Failure()
+        self._java_refs.extend([success, failure])
+        recognizer.process(image) \
+                  .addOnSuccessListener(success) \
+                  .addOnFailureListener(failure)
+
+    # ── Desktop fallback for testing ──────────────────────────────
+    def _ocr_desktop(self, image_path, done):
         try:
-            # 'private' = app-private storage; path is delivered to photo_saved()
-            self.preview.capture_photo(
-                location='private',
-                subdir='images',
-                name=f"invoice_{timestamp}",
-            )
+            import pytesseract
+            from PIL import Image as _PILImage
+            text = pytesseract.image_to_string(_PILImage.open(image_path))
+            done(text, None)
+        except ImportError:
+            done(None,
+                 "Desktop OCR needs pytesseract + the Tesseract program installed "
+                 "(pip install pytesseract). On the phone the built-in recognizer "
+                 "is used instead.")
         except Exception as e:
-            Logger.error(f"PhotoScreen: capture failed: {e}")
+            done(None, f"OCR failed: {e}")
 
-    def photo_saved(self, filepath):
-        """Called by camera4kivy (possibly off the UI thread) once the photo is on disk."""
-        def deliver(dt):
-            app = MDApp.get_running_app()
-            app.root.current = "camera"
-            camera_screen = app.root.get_screen("camera")
-            camera_screen.on_camera_complete(filepath)
-        Clock.schedule_once(deliver, 0)
+    # ── rule-based field extraction ───────────────────────────────
+    @staticmethod
+    def parse_receipt_text(text):
+        """Guess receipt fields from raw OCR text using simple rules."""
+        result = {f: '' for f in OCRExtractor.FIELDS}
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines:
+            return result
+        joined = '\n'.join(lines)
 
-    def cancel(self, instance):
-        MDApp.get_running_app().root.current = "camera"
+        # Vendor: first mostly-alphabetic line near the top of the receipt
+        for l in lines[:6]:
+            letters = sum(c.isalpha() for c in l)
+            if letters >= 3 and letters >= len(l) * 0.5 and not re.search(r'\d{3,}', l):
+                result['vendor'] = l
+                break
+
+        # Date: try the common printed formats
+        months = r'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec'
+        for pat in (
+            r'\b\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}\b',
+            r'\b\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}\b',
+            rf'\b\d{{1,2}}\s*(?:{months})[a-z]*\.?,?\s*\d{{2,4}}\b',
+            rf'\b(?:{months})[a-z]*\.?\s*\d{{1,2}},?\s*\d{{2,4}}\b',
+        ):
+            m = re.search(pat, joined, re.IGNORECASE)
+            if m:
+                result['date'] = m.group(0)
+                break
+
+        # Invoice / receipt number
+        m = re.search(
+            r'(?:invoice|receipt|rcpt|bill|inv)[\s:#.]*(?:no|number|num)?[\s:#.]*'
+            r'([A-Za-z0-9][A-Za-z0-9\-/]{2,})',
+            joined, re.IGNORECASE)
+        if m:
+            result['invoice_number'] = m.group(1)
+
+        # Money amounts ------------------------------------------------
+        money_re = re.compile(r'(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{1,2})')
+
+        def amount_on_line(line):
+            cleaned = line.replace('$', ' ').replace('Rs', ' ').replace('₨', ' ')
+            nums = money_re.findall(cleaned)
+            if not nums:
+                return None
+            try:
+                # amounts are printed on the right side of the line
+                return float(nums[-1].replace(',', ''))
+            except ValueError:
+                return None
+
+        def find_keyword_amount(keywords, exclude=()):
+            # totals live near the bottom, so scan bottom-up
+            for l in reversed(lines):
+                low = l.lower()
+                if any(k in low for k in keywords) and not any(x in low for x in exclude):
+                    v = amount_on_line(l)
+                    if v is not None:
+                        return v
+            return None
+
+        total = find_keyword_amount(
+            ('grand total', 'amount due', 'total'),
+            exclude=('subtotal', 'sub total', 'sub-total'))
+        subtotal = find_keyword_amount(('subtotal', 'sub total', 'sub-total'))
+        tax = find_keyword_amount(('tax', 'gst', 'vat', 'hst'))
+
+        if total is None:
+            # fall back to the largest number found anywhere on the receipt
+            all_vals = [v for v in (amount_on_line(l) for l in lines) if v is not None]
+            if all_vals:
+                total = max(all_vals)
+
+        if total is not None:
+            result['total'] = f"{total:.2f}"
+        if subtotal is not None:
+            result['amount'] = f"{subtotal:.2f}"
+        elif total is not None and tax is not None and total > tax:
+            result['amount'] = f"{total - tax:.2f}"
+        if tax is not None:
+            result['tax'] = f"{tax:.2f}"
+
+        return result
 
 
 class CameraScreen(MDScreen):
@@ -522,6 +520,7 @@ class CameraScreen(MDScreen):
         super().__init__(**kwargs)
         self.name = "camera"
         self.extractor = InvoiceExtractor()
+        self.ocr = OCRExtractor()
         self.captured_image_path = None
         self.invoices = []
         self.current_filename = "noname.json"
@@ -599,15 +598,6 @@ class CameraScreen(MDScreen):
         self.camera_btn.bind(on_press=self.take_photo)
         layout.add_widget(self.camera_btn)
         
-        # ── Gallery button (always available fallback) ────────────────
-        self.gallery_btn = MDFlatButton(
-            text="…or pick an image from files",
-            pos_hint={'center_x': 0.5},
-            font_size="13sp",
-        )
-        self.gallery_btn.bind(on_press=lambda inst: self.show_file_picker())
-        layout.add_widget(self.gallery_btn)
-        
         # ── Image preview ─────────────────────────────────────────────
         self.image_preview = Image(
             size_hint_y=None,
@@ -619,7 +609,7 @@ class CameraScreen(MDScreen):
         
         # ── Extract button (shown after photo is taken) ───────────────
         self.extract_btn = MDRaisedButton(
-            text="✦  Read Receipt Data",
+            text="✦  Read with AI  (best)",
             size_hint=(0.75, None),
             height=dp(48),
             pos_hint={'center_x': 0.5},
@@ -629,6 +619,18 @@ class CameraScreen(MDScreen):
         )
         self.extract_btn.bind(on_press=self.extract_data)
         layout.add_widget(self.extract_btn)
+
+        # ── Free OCR button (shown after photo is taken) ──────────────
+        self.ocr_btn = MDRaisedButton(
+            text="🔎  Read with OCR  (free)",
+            size_hint=(0.75, None),
+            height=dp(44),
+            pos_hint={'center_x': 0.5},
+            opacity=0,
+            font_size="14sp",
+        )
+        self.ocr_btn.bind(on_press=self.extract_data_ocr)
+        layout.add_widget(self.ocr_btn)
         
         # ── Export row ────────────────────────────────────────────────
         export_label = MDLabel(
@@ -896,21 +898,29 @@ class CameraScreen(MDScreen):
                     return
 
                 try:
-                    if not REQUESTS_AVAILABLE:
-                        raise RuntimeError("requests package not installed")
                     if provider == "Anthropic Claude":
-                        InvoiceExtractor.anthropic_request(
-                            key,
-                            {"model": model, "max_tokens": 10,
-                             "messages": [{"role": "user", "content": "Hi"}]},
-                            timeout=30,
-                        )
+                        try:
+                            import anthropic
+                            client = anthropic.Anthropic(api_key=key)
+                            client.messages.create(
+                                model=model,
+                                max_tokens=10,
+                                messages=[{"role": "user", "content": "Hi"}],
+                            )
+                        except ImportError:
+                            # Fall back to openai-compat
+                            if not OPENAI_AVAILABLE:
+                                raise RuntimeError("Neither anthropic nor openai SDK installed")
+                            client = openai.OpenAI(api_key=key, base_url=url)
+                            client.chat.completions.create(
+                                model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=5
+                            )
                     else:
-                        InvoiceExtractor.openai_compat_request(
-                            url, key,
-                            {"model": model, "max_tokens": 5,
-                             "messages": [{"role": "user", "content": "Hi"}]},
-                            timeout=30,
+                        if not OPENAI_AVAILABLE:
+                            raise RuntimeError("openai SDK not installed")
+                        client = openai.OpenAI(api_key=key, base_url=url)
+                        client.chat.completions.create(
+                            model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=5
                         )
                     test_label.text = "✓  Connection successful!"
                     test_label.theme_text_color = "Custom"
@@ -1006,61 +1016,24 @@ class CameraScreen(MDScreen):
         dialog.open()
     
     def take_photo(self, instance):
-        """Open the live camera on Android; fall back to the file picker elsewhere.
-
-        NOTE: platform.system() returns 'Linux' on Android, so we must use
-        kivy's platform detection (IS_ANDROID) instead."""
-        if IS_ANDROID:
-            # Always run the permission flow first; whether the live camera
-            # is actually available is decided after permission is granted.
-            self.open_camera_with_permission()
-            return
-        # Desktop: pick an image file instead
-        self.show_file_picker()
-
-    def launch_camera(self):
-        """Open the live preview if camera4kivy is bundled; otherwise explain
-        why and fall back to the file picker (never fail silently)."""
-        app = MDApp.get_running_app()
-        if CAMERA4KIVY_AVAILABLE:
-            app.root.current = "photo"
-        else:
-            self.show_error(
-                "The live camera module (camera4kivy) is not included in this "
-                "build of the app, so the camera cannot be opened.\n\n"
-                "To fix: add 'camera4kivy, gestures4kivy' to requirements in "
-                "buildozer.spec and add the camerax_provider p4a hook, then "
-                "rebuild the APK.\n\n"
-                "For now you can pick a receipt photo from your files instead.")
-            self.show_file_picker()
-
-    def open_camera_with_permission(self):
-        """Request the CAMERA runtime permission (Android 6+) then open the preview."""
-        try:
-            from android.permissions import (
-                request_permissions, check_permission, Permission)
-
-            if check_permission(Permission.CAMERA):
-                self.launch_camera()
+        """Take a photo using the device camera or file picker"""
+        # On desktop/Windows, use file picker as fallback
+        is_desktop = platform.system() in ['Windows', 'Linux', 'Darwin']
+        
+        if CAMERA_AVAILABLE and not is_desktop:
+            # Try camera on mobile devices
+            try:
+                camera.take_picture(
+                    filename=self.get_image_path(),
+                    on_complete=self.on_camera_complete
+                )
                 return
-
-            def on_result(permissions, grants):
-                def apply(dt):
-                    if grants and all(grants):
-                        self.launch_camera()
-                    else:
-                        self.show_error(
-                            "Camera permission was denied. You can enable it in "
-                            "Settings → Apps → Receipt Reader → Permissions, "
-                            "or pick a receipt image from your gallery instead.")
-                        self.show_file_picker()
-                Clock.schedule_once(apply, 0)
-
-            request_permissions([Permission.CAMERA], on_result)
-        except Exception as e:
-            Logger.error(f"Permission handling failed: {e}")
-            # Best effort: try opening the camera anyway
-            self.launch_camera()
+            except Exception as e:
+                Logger.error(f"Camera error: {e}")
+                # Fall through to file picker
+        
+        # Use file picker for desktop or if camera fails
+        self.show_file_picker()
     
     def get_image_path(self):
         """Get path for saving captured image"""
@@ -1078,6 +1051,7 @@ class CameraScreen(MDScreen):
             self.image_preview.source = filename
             self.image_preview.reload()
             self.extract_btn.opacity = 1
+            self.ocr_btn.opacity = 1
             Logger.info(f"Photo saved to: {filename}")
         else:
             self.show_error("Failed to capture photo")
@@ -1157,6 +1131,34 @@ class CameraScreen(MDScreen):
                 self.show_extracted_data(empty_data)
         
         Clock.schedule_once(process_extraction, 0.1)
+    
+    def extract_data_ocr(self, instance):
+        """Extract receipt data using free on-device OCR (no API key needed)."""
+        if not self.captured_image_path:
+            self.show_error("No image captured")
+            return
+
+        dialog = MDDialog(
+            text="Reading text from your receipt…",
+            auto_dismiss=False
+        )
+        dialog.open()
+
+        def on_ocr_done(parsed, error):
+            dialog.dismiss()
+            if error:
+                self.show_error(f"OCR failed: {error}")
+                parsed = None
+            if not parsed or not any(parsed.values()):
+                self.show_info(
+                    "OCR could not read much from this image. Please fill in the "
+                    "details manually — or try the AI reader for better accuracy."
+                )
+                parsed = {f: '' for f in OCRExtractor.FIELDS}
+            # OCR guesses can be imperfect — user reviews in the edit dialog
+            self.show_extracted_data(parsed)
+
+        self.ocr.extract(self.captured_image_path, on_ocr_done)
     
     def show_extracted_data(self, data):
         """Show extracted data in a dialog for review/editing"""
@@ -1661,19 +1663,7 @@ class CameraScreen(MDScreen):
         
         # Create file chooser
         filechooser = FileChooserIconView()
-        # Pick a sensible starting folder: shared storage on Android
-        # (os.path.expanduser("~") points at an inaccessible dir there)
-        start_path = os.path.expanduser("~")
-        if IS_ANDROID:
-            try:
-                from android.storage import primary_external_storage_path
-                start_path = primary_external_storage_path()
-            except Exception as e:
-                Logger.warning(f"primary_external_storage_path failed: {e}")
-                start_path = "/storage/emulated/0"
-            if not os.path.isdir(start_path):
-                start_path = os.path.expanduser("~")
-        filechooser.path = start_path
+        filechooser.path = os.path.expanduser("~")
         filechooser.filters = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.gif']
         
         content = MDBoxLayout(orientation='vertical', spacing=10, padding=10)
@@ -2377,7 +2367,6 @@ class ReceiptReaderApp(MDApp):
         sm.add_widget(CameraScreen())
         sm.add_widget(ViewScreen())
         sm.add_widget(SaveScreen())
-        sm.add_widget(PhotoScreen())
         sm.current = "camera"  # Set initial screen
         return sm
     
@@ -2934,10 +2923,10 @@ class ReceiptReaderApp(MDApp):
                         story.append(Spacer(1, 0.2*inch))
                         continue
                     
-                    dims = get_image_dimensions(image_path)
-                    if dims:
-                        # Scale image proportionally to fit standard size
-                        img_width, img_height = dims
+                    if PIL_AVAILABLE:
+                        # Open and resize image to standard size
+                        img = PILImage.open(image_path)
+                        img_width, img_height = img.size
                         
                         # Calculate size maintaining aspect ratio, fitting within standard dimensions
                         ratio = min(standard_width / img_width, standard_height / img_height)
