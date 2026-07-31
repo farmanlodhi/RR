@@ -52,36 +52,22 @@ jobs:
       #    IMPORTANT: each hash must be on its own line with NO leading
       #    whitespace — sdkmanager compares lines byte-for-byte, and a
       #    stray leading space will make the license look "unaccepted"
-      #    even though the file looks right at a glance. Heredocs avoid
-      #    this footgun much better than a multi-line printf. ─────────
+      #    even though the file looks right at a glance. Each hash is
+      #    passed as a separate printf argument so there's no line-
+      #    continuation formatting to accidentally add whitespace. ────
       - name: Accept Android SDK licences
         run: |
           mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
-
-          # android-sdk-license (covers platform-tools, build-tools, platforms)
-          cat > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license << 'EOF'
-8933bad161af4178b1185d1a37fbf41ea5269c55
-d56f5187479451eabf01fb78af6dfcb131a6481e
-24333f8a63b6825ea9c5514f83c2829b004d1fee
-EOF
-
-          # android-sdk-preview-license
-          cat > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license << 'EOF'
-84831b9409646a918e30573bab4c9c91346d8abd
-EOF
-
-          # intel-android-extra-license
-          cat > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license << 'EOF'
-d975f751698a77b662f1254ddbeed3901e976f5a
-EOF
-
+          printf '%s\n%s\n%s\n' '8933bad161af4178b1185d1a37fbf41ea5269c55' 'd56f5187479451eabf01fb78af6dfcb131a6481e' '24333f8a63b6825ea9c5514f83c2829b004d1fee' > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
+          printf '%s\n' '84831b9409646a918e30573bab4c9c91346d8abd' > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
+          printf '%s\n' 'd975f751698a77b662f1254ddbeed3901e976f5a' > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
           echo "Licence files written:"
           ls -la ~/.buildozer/android/platform/android-sdk/licenses/
           echo ""
           echo "=== Verifying no stray whitespace in license files ==="
           for f in ~/.buildozer/android/platform/android-sdk/licenses/*; do
             echo "--- $f ---"
-            cat -A "$f" | head -5
+            cat -A "$f"
           done
 
       - name: Build APK
