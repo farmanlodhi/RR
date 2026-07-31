@@ -38,6 +38,24 @@ android.ndk_api = 21
 # Pin build-tools to 33.0.2 — avoids the newer versions that hit licence issues
 android.build_tools_version = 33.0.2
 
+# Licences can be pulled in for packages resolved as dependencies during
+# the actual install step (e.g. a build-tools version not yet known when
+# buildozer first primes licences), which otherwise blocks the build with
+# an unanswered "Accept? (y/N)" prompt. The CI workflow also pipes `yes`
+# into buildozer as a second layer of defence for the same reason.
+android.accept_sdk_license = True
+
+# Pin python-for-android to this specific tagged release. Without this,
+# buildozer clones p4a's current `master` branch, which now includes
+# newer-architecture work (originally on the `develop` branch) that
+# builds Kivy via a generic `pip install` inside a venv instead of p4a's
+# dedicated Kivy recipe. The generic pip build doesn't set the
+# Android/GLES cross-compile flags Kivy's setup.py needs, so it tries to
+# compile against desktop OpenGL headers (GL/gl.h) that don't exist in
+# the NDK sysroot, and fails with "'GL/gl.h' file not found". This tag
+# still uses the old recipe-based build, which sets those flags correctly.
+p4a.branch = v2024.01.21
+
 android.archs = arm64-v8a
 
 android.enable_androidx = True
