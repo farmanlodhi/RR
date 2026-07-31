@@ -79,12 +79,25 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      # NOTE: `android.accept_sdk_license = True` in buildozer.spec primes
+      # licences for packages already known at that point, but packages
+      # pulled in later (e.g. a build-tools version resolved as a
+      # dependency during the actual install step) can still hit a fresh,
+      # unanswered "Accept? (y/N)" prompt. Piping `yes` into the whole
+      # build answers any prompt at any point, belt-and-suspenders style.
+      #
+      # We deliberately do NOT use `set -o pipefail` here: when buildozer
+      # exits, `yes` gets killed by SIGPIPE and reports a nonzero exit
+      # code even on a fully successful build, which pipefail would
+      # wrongly treat as failure. Instead we read buildozer's own exit
+      # code out of bash's PIPESTATUS array (position 1 = the middle
+      # command in the `yes | buildozer | tee` pipeline).
       - name: Build APK
         run: |
-          # pipefail: without it, `tee` masks buildozer's exit code and
-          # failed builds show green with no APK
-          set -o pipefail
-          buildozer -v android debug 2>&1 | tee build.log
+          yes | buildozer -v android debug 2>&1 | tee build.log
+          buildozer_exit=${PIPESTATUS[1]}
+          echo "buildozer exit code: $buildozer_exit"
+          exit "$buildozer_exit"
 
       - name: Show failure context
         if: failure()
