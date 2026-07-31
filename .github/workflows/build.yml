@@ -27,6 +27,7 @@ jobs:
             libssl-dev libffi-dev \
             libsqlite3-dev \
             autoconf automake libtool pkg-config \
+            gettext autopoint \
             zlib1g-dev libncurses5-dev libncursesw5-dev \
             cmake lld ccache \
             openjdk-17-jdk \
@@ -35,44 +36,67 @@ jobs:
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip wheel setuptools
-          pip install buildozer "cython<3"
+          # Pin buildozer 1.5.0 — matches the recipe-based p4a v2024.01.21
+          # pinned in buildozer.spec. Buildozer 1.6+ targets the new
+          # wheel-based p4a (2026.x) which cannot build pyjnius/pillow.
+          pip install buildozer==1.5.0 "cython<3"
 
       - name: Cache Buildozer directory
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: |
-            buildozer-${{ runner.os }}-
+          # Key includes the workflow file too, so any change to either
+          # automatically starts from a clean cache (failed runs still
+          # save their cache, which can otherwise poison the next run).
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec', '.github/workflows/build.yml') }}
 
-      # ── THE FIX: pre-accept all Android SDK licences by writing the
-      #    licence hash files that sdkmanager checks for. This bypasses
-      #    the interactive prompt entirely.
-      #
-      #    IMPORTANT: each hash must be on its own line with NO leading
-      #    whitespace — sdkmanager compares lines byte-for-byte, and a
-      #    stray leading space will make the license look "unaccepted"
-      #    even though the file looks right at a glance. Each hash is
-      #    passed as a separate printf argument so there's no line-
-      #    continuation formatting to accidentally add whitespace. ────
-      - name: Accept Android SDK licences
+      # NOTE: no manual licence step. Pre-creating the android-sdk folder
+      # makes buildozer 1.5.0 think the SDK is already installed and skip
+      # downloading it (leaving sdkmanager missing). Licences are accepted
+      # via `android.accept_sdk_license = True` in buildozer.spec instead.
+
+      # ── Pre-seed the liblzma source tarball ─────────────────────────
+      # The p4a liblzma recipe downloads xz-5.2.4.tar.gz from tukaani.org,
+      # which no longer serves it (release downloads moved to GitHub after
+      # the 2024 xz incident) — the download times out and kills the build.
+      # p4a skips the download when the file + its .mark marker already
+      # exist in <storage-dir>/packages/liblzma/, so we fetch the identical
+      # source from GitHub's tag archive (extracts to xz-5.2.4/ too; the
+      # recipe declares no checksum, and it runs autogen.sh itself since
+      # the tag archive ships no pre-generated configure script).
+      - name: Pre-seed liblzma source (tukaani.org unreachable)
         run: |
-          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
-          printf '%s\n%s\n%s\n' '8933bad161af4178b1185d1a37fbf41ea5269c55' 'd56f5187479451eabf01fb78af6dfcb131a6481e' '24333f8a63b6825ea9c5514f83c2829b004d1fee' > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
-          printf '%s\n' '84831b9409646a918e30573bab4c9c91346d8abd' > ~/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
-          printf '%s\n' 'd975f751698a77b662f1254ddbeed3901e976f5a' > ~/.buildozer/android/platform/android-sdk/licenses/intel-android-extra-license
-          echo "Licence files written:"
-          ls -la ~/.buildozer/android/platform/android-sdk/licenses/
-          echo ""
-          echo "=== Verifying no stray whitespace in license files ==="
-          for f in ~/.buildozer/android/platform/android-sdk/licenses/*; do
-            echo "--- $f ---"
-            cat -A "$f"
-          done
+          PKG_DIR=".buildozer/android/platform/build-arm64-v8a/packages/liblzma"
+          mkdir -p "$PKG_DIR"
+          curl -L --fail --retry 3 -o "$PKG_DIR/xz-5.2.4.tar.gz" \
+            https://github.com/tukaani-project/xz/archive/refs/tags/v5.2.4.tar.gz
+          touch "$PKG_DIR/.mark-xz-5.2.4.tar.gz"
+          ls -la "$PKG_DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: Build APK
         run: |
+          # pipefail: without it, `tee` masks buildozer's exit code and
+          # failed builds show green with no APK
+          set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Show failure context
+        if: failure()
+        run: |
+          echo "=========== Lines around 'Command failed' ==========="
+          grep -n -B 5 "Command failed" build.log | head -60 || true
+          echo ""
+          echo "=========== First real errors (excluding warnings) ==========="
+          grep -n -m 10 -E "error:|ERROR:|FAILED|Exception" build.log | head -20 || true
+          echo ""
+          echo "=========== Last 120 lines of build log ==========="
+          tail -120 build.log
 
       - name: Find APK
         if: always()
